@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phone Camera - Object Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #1a1a1a;
+            color: white;
+            overflow: hidden;
+        }
+
+        .phone-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+        }
+
+        #localVideo {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .controls-panel {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff4757;
+            animation: pulse 2s infinite;
+        }
+
+        .status-connected .status-dot {
+            background: #2ed573;
+        }
+
+        .status-connecting .status-dot {
+            background: #ffa502;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .control-buttons {
+            display: flex;
+            gap: 15px;
+        }
+
+        .btn {
+            padding: 12px 16px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+            backdrop-filter: blur(10px);
+        }
+
+        .btn-primary {
+            background: rgba(55, 66, 250, 0.8);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: rgba(87, 96, 111, 0.8);
+            color: white;
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+        }
+
+        .metrics-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 15px;
+            min-width: 150px;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.8rem;
+        }
+
+        .metric-label {
+            color: #ccc;
+        }
+
+        .metric-value {
+            font-weight: bold;
+            color: #2ed573;
+        }
+
+        .detection-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 10px;
+            max-width: 200px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .detection-item {
+            background: rgba(46, 213, 115, 0.2);
+            padding: 5px 8px;
+            margin-bottom: 3px;
+            border-radius: 5px;
+            font-size: 0.7rem;
+            border-left: 3px solid #2ed573;
+        }
+
+        .permission-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .permission-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .permission-text {
+            font-size: 1.2rem;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top: 4px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background: rgba(255, 71, 87, 0.1);
+            border: 2px solid #ff4757;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .fullscreen-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            border: none;
+            color: white;
+            padding: 10px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.2rem;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div class="phone-container">
+        <!-- Permission/Loading Screen -->
+        <div class="permission-screen" id="permissionScreen">
+            <div class="permission-icon">📹</div>
+            <div class="permission-text">
+                Allow camera access to start object detection
+            </div>
+            <button class="btn btn-primary" id="startButton" onclick="startCamera()">
+                📱 Start Camera
+            </button>
+            <div class="spinner" id="loadingSpinner" style="display: none;"></div>
+            <div class="error-message" id="errorMessage" style="display: none;"></div>
+        </div>
+
+        <!-- Main Camera View -->
+        <div class="video-container" id="videoContainer" style="display: none;">
+            <video id="localVideo" autoplay playsinline muted></video>
+            <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
+            
+            <!-- Fullscreen Toggle -->
+            <button class="fullscreen-toggle" onclick="toggleFullscreen()">⛶</button>
+            
+            <!-- Live Metrics -->
+            <div class="metrics-overlay" id="metricsOverlay">
+                <div class="metric-row">
+                    <span class="metric-label">FPS:</span>
+                    <span class="metric-value" id="fpsDisplay">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Latency:</span>
+                    <span class="metric-value" id="latencyDisplay">-- ms</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Objects:</span>
+                    <span class="metric-value" id="objectCountDisplay">--</span>
+                </div>
+            </div>
+
+            <!-- Recent Detections -->
+            <div class="detection-overlay" id="detectionOverlay">
+                <div style="font-size: 0.7rem; color: #ccc; margin-bottom: 8px;">Recent:</div>
+                <div id="recentDetections">
+                    <div style="color: #999; font-size: 0.7rem;">No objects detected</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls Panel -->
+        <div class="controls-panel" id="controlsPanel" style="display: none;">
+            <div class="status-indicator" id="connectionStatus">
+                <div class="status-dot"></div>
+                <span>Connecting...</span>
+            </div>
+
+            <div class="control-buttons">
+                <button class="btn btn-secondary" id="switchCamera" onclick="switchCamera()">
+                    🔄 Flip
+                </button>
+                <button class="btn btn-primary" id="qualityToggle" onclick="toggleQuality()">
+                    📺 HD
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/ort.min.js"></script>
+    <script src="js/yolo-detector.js"></script>
+    <script src="js/phone.js"></script>
+</body>
+</html>
