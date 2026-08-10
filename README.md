@@ -1,147 +1,93 @@
-# 📱🖥️ Real-Time WebRTC Object Detection
+# 📱🎯 Real-Time WebRTC Multi-Object Detection
 
-A privacy-focused, real-time object detection system using WebRTC to stream camera feed from mobile devices to desktop browsers for AI processing.
+A privacy-first, real-time computer vision system that streams a mobile camera feed to a desktop browser over **WebRTC** and performs **genuine multi-object detection** using **TensorFlow.js & COCO-SSD** with WebGL GPU acceleration.
 
-## 🎯 **Features**
+---
 
-- **📱 Mobile Camera Streaming**: Use your phone as a wireless camera
-- **🖥️ Desktop Processing**: Real-time object detection in browser
-- **🔒 Privacy-First**: All processing happens locally on your network
-- **🚀 WebRTC Technology**: Low-latency peer-to-peer video streaming
-- **🧠 AI-Powered**: Browser-based ONNX model inference
-- **📊 Performance Metrics**: Live FPS and latency monitoring
+## ✨ Features
 
-## 🚀 **Quick Start**
+- 📱 **Wireless Mobile Camera Stream:** Transform any phone into a high-frame-rate wireless camera stream via P2P WebRTC.
+- 🧠 **Real On-Device AI Detection:** Powered by TensorFlow.js COCO-SSD (detects 80 real COCO classes: person, car, phone, bottle, laptop, chair, etc.).
+- 🔒 **Privacy-First & Secure:**
+  - Dynamic in-memory self-signed TLS certificates (no hardcoded secrets).
+  - Secure room-based signaling isolation (devices pair securely via 4-character Room codes).
+  - WebRTC video is processed locally in the client browser with GPU acceleration.
+- ⚡ **Zero Local Heavy Downloads:** TensorFlow.js and COCO-SSD load directly via CDN into browser WebGL cache.
+- 📊 **Real-time Performance Metrics:** Live measurement of latency, processing FPS, object counts, and interactive latency charts.
+- 🐳 **Container Ready:** Clean Docker and Docker Compose configuration.
 
-### Prerequisites
+---
+
+## 🚀 Quick Start
+
+### 1. Prerequisites
 - **Node.js** 16+ ([Download](https://nodejs.org/))
-- **Modern Browser** (Chrome, Firefox, Safari)
-- **Mobile Device** with camera
+- **Modern Web Browser** (Chrome, Edge, Safari, Firefox) with WebGL enabled
+- **Mobile Device** with a camera on the same Wi-Fi / Local Network
 
-### Installation
+### 2. Installation
 ```bash
 # Clone the repository
 git clone https://github.com/deepakchoudhary-dc/Real-time-WebRTC-VLM-Multi-Object-Detection.git
 cd Real-time-WebRTC-VLM-Multi-Object-Detection
 
-# Install dependencies
+# Install lightweight dependencies
 npm install
 
-# Download AI models
-./scripts/download_models.sh
-
-# Start the server (HTTPS for phone compatibility)
+# Start the secure HTTPS server
 npm start
 ```
 
-### Usage
-1. **Desktop**: Open https://localhost:3443 in your browser (accept security warning)
-2. **Mobile**: Scan the QR code or visit https://[your-ip]:3443/phone
-3. **Detection**: Point your phone camera at objects to see live detection
-
-## 🔧 **Mode Switch**
-
-### WASM Mode (Low-Resource, Default)
-```bash
-MODE=wasm npm start
-```
-- Browser-based inference using ONNX Runtime Web
-- Supports modest laptops (Intel i5, 8GB RAM)
-- Input: 320×240, Target: 10-15 FPS
-- CPU usage: ~40-60% on Intel i5
-
-### Server Mode (Higher Performance)  
-```bash
-MODE=server npm start
-```
-- Server-side inference with full-resolution support
-- Requires dedicated server or powerful laptop
-
-## 📈 **Benchmarking**
-
-Run official benchmark for 30 seconds:
-
-```bash
-# Ensure server is running
-npm start
-
-# In another terminal, run benchmark  
-./bench/run_bench.sh --duration 30 --mode wasm
-
-# View results
-cat metrics.json
-```
-
-**Expected Performance (WASM Mode on Intel i5, 8GB RAM):**
-- Median E2E Latency: 125ms
-- P95 E2E Latency: 198ms
-- Processing FPS: 12.3
-- CPU Usage: ~45%
-
-## 🔒 **Privacy & Security**
-
-✅ **100% Local Processing** - No cloud services or external APIs  
-✅ **No Data Storage** - Video streams are processed in real-time only  
-✅ **Network Isolation** - Works entirely on your local network  
-✅ **Open Source** - Full transparency, no hidden tracking  
-
-## 🛠️ **Technology Stack**
-
-- **Frontend**: Vanilla JavaScript, WebRTC, ONNX.js
-- **Backend**: Node.js, Socket.IO, Express
-- **AI Models**: MobileNet-SSD, YOLOv5n (ONNX format)
-- **Protocols**: HTTPS, WebRTC, Socket.IO
-
-## 📁 **Project Structure**
-
-```
-├── frontend/           # Client-side code
-│   ├── js/            # JavaScript modules
-│   ├── index.html     # Desktop interface
-│   └── phone.html     # Mobile interface
-├── server/            # Server-side code
-├── models/            # AI models (downloaded separately)
-├── scripts/           # Setup and utility scripts
-└── docs/              # Documentation
-```
-
-## 🔧 **Configuration**
-
-### Server Modes
-- **WASM Mode** (default): Client-side inference
-- **Server Mode**: Server-side processing
-
-### Environment Variables
-```bash
-PORT=3000              # Server port
-MODE=wasm              # Processing mode (wasm/server)
-```
-
-## 📈 **Performance**
-
-- **Latency**: <200ms end-to-end
-- **Frame Rate**: 10-15 FPS
-- **Resolution**: 320×240 optimized for speed
-- **Models**: Lightweight ONNX models for browser compatibility
-
-## 🤝 **Contributing**
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## 📄 **License**
-
-This project is open source and available under the [MIT License](LICENSE).
-
-## 🆘 **Support**
-
-- **Issues**: Report bugs or request features via GitHub Issues
-- **Documentation**: See `/docs` folder for detailed documentation
-- **Community**: Join discussions in GitHub Discussions
+### 3. Connect & Detect
+1. **Desktop:** Open `https://localhost:3443` in your browser.
+   - *Note:* Accept the self-signed certificate warning (standard for local HTTPS).
+2. **Mobile:** Scan the generated QR code or open `https://<YOUR-LOCAL-IP>:3443/phone?room=<ROOM_CODE>`.
+3. **Detection:** Tap **"Start Camera"** on your phone. Real-time bounding boxes and labels will track objects on both mobile and desktop screens!
 
 ---
 
-**⭐ Star this project if you find it useful!**
+## 🛠️ Architecture & Technology Stack
+
+```
+[ Mobile Browser (Phone) ]
+       │  ▲
+WebRTC │  │ Socket.IO Signaling (Room-Isolated)
+Video  │  │ & Detection Relay
+       ▼  │
+[ Desktop Browser / Client ]  ◄── [ HTTPS / Express Backend ]
+       │
+   WebGL / TF.js COCO-SSD
+  (Real-Time Inference Overlay)
+```
+
+- **Frontend:** Modern Vanilla JavaScript (ES6+), HTML5 Canvas API, WebGL.
+- **Computer Vision:** TensorFlow.js (`@tensorflow/tfjs`) + COCO-SSD (`@tensorflow-models/coco-ssd`).
+- **Backend & Signaling:** Node.js, Express, Socket.IO, `selfsigned`.
+- **Security:** Room-scoped WebRTC signaling, in-memory dynamic TLS, Content Security Policy, rate limiting, payload validation.
+
+---
+
+## 🔒 Cybersecurity & Hardening
+
+- **Dynamic Ephemeral Certificates:** Generated at boot time using `selfsigned`; zero private keys stored in the git repository.
+- **Room-Isolated Signaling:** Prevents cross-session eavesdropping and signaling collision by strictly scoping SDP offers/answers to unique room IDs.
+- **Socket.IO Hardening:** Message size limits (1MB cap) and payload schema validation on all incoming socket events.
+- **XSS Prevention:** Safe DOM manipulation with no raw HTML injection.
+- **Memory Safety:** Metrics ring buffer (capped at 1,000 entries) preventing server memory leaks.
+
+---
+
+## 🐳 Docker Deployment
+
+Run with Docker Compose in one command:
+
+```bash
+docker-compose up --build
+```
+Access at `https://localhost:3443` (HTTP redirects automatically from `http://localhost:3000`).
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).

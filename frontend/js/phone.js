@@ -1,562 +1,524 @@
-// Phone Camera JavaScript
+/**
+ * Phone Camera — WebRTC Object Detection
+ *
+ * Captures camera feed, streams to desktop via WebRTC,
+ * runs COCO-SSD detection on-device, and sends detection results
+ * to the desktop for overlay display.
+ */
 class PhoneCamera {
-    constructor() {
-        this.socket = io();
-        this.peerConnection = null;
-        this.localStream = null;
-        this.overlayCanvas = null;
-        this.overlayCtx = null;
-        this.currentCamera = 'user'; // 'user' for front, 'environment' for back
-        this.isHD = false;
-        this.frameId = 0;
-        
-        // Metrics
-        this.metrics = {
-            fps: 0,
-            lastLatency: 0,
-            objectCount: 0,
-            framesSent: 0,
-            lastFpsUpdate: Date.now()
-        };
-        
-        this.recentDetections = [];
-        
-        // Initialize YOLO detector
-        this.yoloDetector = null;
-        this.detectionEnabled = true;
-        
-        this.init();
+  constructor() {
+    this.socket = io();
+    this.peerConnection = null;
+    this.localStream = null;
+    this.overlayCanvas = null;
+    this.overlayCtx = null;
+    this.currentCamera = 'environment'; // Default to back camera
+    this.isHD = false;
+    this.detector = window.objectDetector;
+    this.roomCode = null;
+
+    // Detection state
+    this.isDetecting = false;
+    this.detectionEnabled = true;
+    this.detectionInterval = 300; // ms between detections
+
+    // Metrics
+    this.metrics = {
+      fps: 0,
+      lastLatency: 0,
+      objectCount: 0,
+      framesSent: 0,
+      lastFpsUpdate: Date.now(),
+    };
+
+    this.recentDetections = [];
+
+    this.init();
+  }
+
+  async init() {
+    this.setupCanvas();
+    this.setupWebRTC();
+    this.setupSocketEvents();
+    this.extractRoomCode();
+    this.updateMetricsDisplay();
+
+    // Load AI model
+    this.showModelLoadingUI();
+    const loaded = await this.detector.loadModel((progress) => {
+      this.updateModelProgress(progress);
+    });
+
+    if (loaded) {
+      this.hideModelLoadingUI();
+    } else {
+      this.showModelError();
+    }
+  }
+
+  // ── Room Code ──
+
+  extractRoomCode() {
+    const params = new URLSearchParams(window.location.search);
+    this.roomCode = params.get('room');
+
+    if (this.roomCode) {
+      this.socket.emit('join-room', {
+        roomCode: this.roomCode,
+        role: 'phone',
+      });
+      console.log(`📱 Joining room: ${this.roomCode}`);
+    } else {
+      console.warn('⚠️ No room code in URL. Connection may not pair correctly.');
+    }
+  }
+
+  // ── Model Loading UI ──
+
+  showModelLoadingUI() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.style.display = 'block';
+      el.textContent = '🧠 Loading AI model...';
+    }
+  }
+
+  updateModelProgress(progress) {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = `🧠 Loading AI... ${progress}%`;
+    }
+  }
+
+  hideModelLoadingUI() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = '✅ AI ready';
+      setTimeout(() => {
+        el.style.display = 'none';
+      }, 2000);
+    }
+  }
+
+  showModelError() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = '❌ Model load failed';
+      el.style.background = 'rgba(255,71,87,0.6)';
+    }
+  }
+
+  // ── Canvas ──
+
+  setupCanvas() {
+    this.overlayCanvas = document.getElementById('overlayCanvas');
+    this.overlayCtx = this.overlayCanvas.getContext('2d');
+  }
+
+  resizeCanvas() {
+    const video = document.getElementById('localVideo');
+    const rect = video.getBoundingClientRect();
+
+    this.overlayCanvas.style.width = rect.width + 'px';
+    this.overlayCanvas.style.height = rect.height + 'px';
+
+    const dpr = window.devicePixelRatio || 1;
+    this.overlayCanvas.width = rect.width * dpr;
+    this.overlayCanvas.height = rect.height * dpr;
+    this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // ── WebRTC ──
+
+  setupWebRTC() {
+    const config = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
+    };
+
+    this.peerConnection = new RTCPeerConnection(config);
+
+    this.peerConnection.onconnectionstatechange = () => {
+      const state = this.peerConnection.connectionState;
+      console.log('🔗 Connection state:', state);
+      this.updateConnectionStatus(state);
+    };
+
+    this.peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        this.socket.emit('ice-candidate', event.candidate);
+      }
+    };
+  }
+
+  // ── Socket Events ──
+
+  setupSocketEvents() {
+    this.socket.on('answer', async (answer) => {
+      console.log('✅ Received answer');
+      try {
+        await this.peerConnection.setRemoteDescription(
+          new RTCSessionDescription(answer)
+        );
+      } catch (error) {
+        console.error('Error setting remote description:', error);
+      }
+    });
+
+    this.socket.on('ice-candidate', async (candidate) => {
+      try {
+        await this.peerConnection.addIceCandidate(
+          new RTCIceCandidate(candidate)
+        );
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    });
+
+    this.socket.on('peer-joined', (data) => {
+      console.log(`🖥️ Desktop joined the room`);
+    });
+
+    this.socket.on('peer-left', () => {
+      console.log(`🖥️ Desktop left the room`);
+      this.updateConnectionStatus('disconnected');
+    });
+  }
+
+  // ── Camera ──
+
+  async startCamera() {
+    const startBtn = document.getElementById('startButton');
+    const spinner = document.getElementById('loadingSpinner');
+    const errorEl = document.getElementById('errorMessage');
+
+    if (startBtn) startBtn.style.display = 'none';
+    if (spinner) spinner.style.display = 'block';
+    if (errorEl) errorEl.style.display = 'none';
+
+    try {
+      const constraints = this.getCameraConstraints();
+      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      this.setupLocalVideo();
+      await this.startWebRTCConnection();
+      this.showCameraView();
+      this.startDetectionLoop();
+    } catch (error) {
+      console.error('❌ Camera access failed:', error);
+      this.showError(this.getCameraErrorMessage(error));
+      if (startBtn) startBtn.style.display = 'block';
+      if (spinner) spinner.style.display = 'none';
+    }
+  }
+
+  getCameraConstraints() {
+    const constraints = {
+      video: {
+        facingMode: this.currentCamera,
+        aspectRatio: { ideal: 16 / 9 },
+      },
+      audio: false,
+    };
+
+    if (this.isHD) {
+      constraints.video.width = { ideal: 1280 };
+      constraints.video.height = { ideal: 720 };
+    } else {
+      constraints.video.width = { ideal: 640 };
+      constraints.video.height = { ideal: 480 };
     }
 
-    async init() {
-        await this.setupCanvas();
-        await this.setupWebRTC();
-        await this.setupSocketEvents();
-        this.updateMetricsDisplay();
-        
-        // Initialize YOLO detector
-        this.initializeDetector();
-    }
+    return constraints;
+  }
 
-    async initializeDetector() {
-        try {
-            if (window.yoloDetector) {
-                this.yoloDetector = window.yoloDetector;
-                console.log('🤖 Initializing YOLO detector...');
-                await this.yoloDetector.loadModel();
-                console.log('✅ YOLO detector ready');
-            }
-        } catch (error) {
-            console.error('❌ Failed to initialize detector:', error);
-        }
-    }
+  setupLocalVideo() {
+    const video = document.getElementById('localVideo');
+    video.srcObject = this.localStream;
 
-    setupCanvas() {
-        this.overlayCanvas = document.getElementById('overlayCanvas');
-        this.overlayCtx = this.overlayCanvas.getContext('2d');
-    }
+    video.onloadedmetadata = () => this.resizeCanvas();
+    video.onresize = () => this.resizeCanvas();
+  }
 
-    async setupWebRTC() {
-        const configuration = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        };
+  async startWebRTCConnection() {
+    this.localStream.getTracks().forEach((track) => {
+      this.peerConnection.addTrack(track, this.localStream);
+    });
 
-        this.peerConnection = new RTCPeerConnection(configuration);
+    const offer = await this.peerConnection.createOffer();
+    await this.peerConnection.setLocalDescription(offer);
+    this.socket.emit('offer', offer);
+  }
 
-        // Handle connection state changes
-        this.peerConnection.onconnectionstatechange = () => {
-            const state = this.peerConnection.connectionState;
-            console.log('🔗 Connection state:', state);
-            this.updateConnectionStatus(state);
-        };
+  // ── Detection Loop ──
 
-        // Handle ICE candidates
-        this.peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                this.socket.emit('ice-candidate', event.candidate);
-            }
-        };
-    }
+  startDetectionLoop() {
+    const runDetection = async () => {
+      if (this.isDetecting || !this.detectionEnabled) return;
+      this.isDetecting = true;
 
-    setupSocketEvents() {
-        this.socket.on('answer', async (answer) => {
-            console.log('✅ Received answer');
-            await this.peerConnection.setRemoteDescription(answer);
-        });
-
-        this.socket.on('ice-candidate', async (candidate) => {
-            try {
-                await this.peerConnection.addIceCandidate(candidate);
-            } catch (error) {
-                console.error('Error adding ICE candidate:', error);
-            }
-        });
-
-        this.socket.on('detection-result', (result) => {
-            // Ignore server-side detection results to prevent fake detections
-            console.log('🚫 Ignoring server-side detection result to prevent fake data');
-            // this.handleDetectionResult(result); // Commented out
-        });
-
-        this.socket.on('process-frame-wasm', (frameInfo) => {
-            // In WASM mode, we handle detection locally
-            console.log('📱 WASM mode: Local detection active');
-        });
-    }
-
-    async startCamera() {
-        const startButton = document.getElementById('startButton');
-        const loadingSpinner = document.getElementById('loadingSpinner');
-        const errorMessage = document.getElementById('errorMessage');
-        
-        startButton.style.display = 'none';
-        loadingSpinner.style.display = 'block';
-        errorMessage.style.display = 'none';
-
-        try {
-            // Check if getUserMedia is available with fallback
-            if (!navigator.mediaDevices) {
-                // Try to polyfill for older browsers
-                navigator.mediaDevices = {};
-            }
-            
-            if (!navigator.mediaDevices.getUserMedia) {
-                // Try legacy getUserMedia
-                navigator.mediaDevices.getUserMedia = function(constraints) {
-                    const getUserMedia = navigator.webkitGetUserMedia || 
-                                       navigator.mozGetUserMedia || 
-                                       navigator.msGetUserMedia || 
-                                       navigator.getUserMedia;
-                    
-                    if (!getUserMedia) {
-                        return Promise.reject(new Error('getUserMedia is not supported in this browser'));
-                    }
-                    
-                    return new Promise((resolve, reject) => {
-                        getUserMedia.call(navigator, constraints, resolve, reject);
-                    });
-                };
-            }
-
-            const constraints = this.getCameraConstraints();
-            this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-            
-            await this.setupLocalVideo();
-            await this.startWebRTCConnection();
-            
-            this.showCameraView();
-            this.startFrameCapture();
-            
-        } catch (error) {
-            console.error('❌ Camera access failed:', error);
-            this.showError(this.getCameraErrorMessage(error));
-            
-            startButton.style.display = 'block';
-            loadingSpinner.style.display = 'none';
-        }
-    }
-
-    getCameraConstraints() {
-        const baseConstraints = {
-            video: {
-                facingMode: this.currentCamera,
-                aspectRatio: { ideal: 16/9 }
-            },
-            audio: false
-        };
-
-        if (this.isHD) {
-            baseConstraints.video.width = { ideal: 1280 };
-            baseConstraints.video.height = { ideal: 720 };
-        } else {
-            baseConstraints.video.width = { ideal: 640 };
-            baseConstraints.video.height = { ideal: 480 };
-        }
-
-        return baseConstraints;
-    }
-
-    setupLocalVideo() {
-        const localVideo = document.getElementById('localVideo');
-        localVideo.srcObject = this.localStream;
-        
-        localVideo.onloadedmetadata = () => {
-            this.resizeCanvas();
-        };
-
-        localVideo.onresize = () => {
-            this.resizeCanvas();
-        };
-    }
-
-    resizeCanvas() {
-        const localVideo = document.getElementById('localVideo');
-        const rect = localVideo.getBoundingClientRect();
-        
-        this.overlayCanvas.style.width = rect.width + 'px';
-        this.overlayCanvas.style.height = rect.height + 'px';
-        
-        const dpr = window.devicePixelRatio || 1;
-        this.overlayCanvas.width = rect.width * dpr;
-        this.overlayCanvas.height = rect.height * dpr;
-        this.overlayCtx.scale(dpr, dpr);
-    }
-
-    async startWebRTCConnection() {
-        // Add local stream to peer connection
-        this.localStream.getTracks().forEach(track => {
-            this.peerConnection.addTrack(track, this.localStream);
-        });
-
-        // Create and send offer
-        const offer = await this.peerConnection.createOffer();
-        await this.peerConnection.setLocalDescription(offer);
-        
-        this.socket.emit('offer', offer);
-    }
-
-    startFrameCapture() {
-        let lastCaptureTime = Date.now();
-        let lastDetectionTime = Date.now();
-        
-        const captureFrame = () => {
-            const now = Date.now();
-            const timeSinceLastCapture = now - lastCaptureTime;
-            const timeSinceLastDetection = now - lastDetectionTime;
-            
-            // Slower detection for more stable display
-            const targetInterval = 100; // ~10 FPS (slower capture)
-            const detectionInterval = 800; // Run detection every 800ms (1.25 FPS - much slower)
-            
-            if (timeSinceLastCapture >= targetInterval) {
-                this.captureAndSendFrame();
-                lastCaptureTime = now;
-                
-                // Update FPS counter
-                this.metrics.framesSent++;
-                if (now - this.metrics.lastFpsUpdate >= 1000) {
-                    this.metrics.fps = this.metrics.framesSent;
-                    this.metrics.framesSent = 0;
-                    this.metrics.lastFpsUpdate = now;
-                }
-                
-                // Run detection less frequently
-                if (timeSinceLastDetection >= detectionInterval && this.detectionEnabled) {
-                    this.runDetection();
-                    lastDetectionTime = now;
-                }
-            }
-            
-            requestAnimationFrame(captureFrame);
-        };
-        
-        requestAnimationFrame(captureFrame);
-    }
-
-    async runDetection() {
-        try {
-            const video = document.getElementById('localVideo');
-            if (video.readyState !== 4) return;
-            
-            // Use YOLO detector for real object detection
-            let detections = [];
-            
-            if (window.yoloDetector) {
-                // Ensure detector is loaded
-                if (!window.yoloDetector.modelLoaded) {
-                    await window.yoloDetector.loadModel();
-                }
-                
-                // Run actual detection
-                detections = await window.yoloDetector.detect(video);
-                
-                if (detections.length > 0) {
-                    const labels = detections.map(d => `${d.label} (${Math.round(d.score * 100)}%)`);
-                    console.log(`🔍 Detection result: ${detections.length} objects found - ${labels.join(', ')}`);
-                } else {
-                    console.log(`🔍 Detection result: No objects detected`);
-                }
-            } else {
-                console.log('⚠️ YOLO detector not available');
-            }
-            
-            const result = {
-                frame_id: `phone_${++this.frameId}_${Date.now()}`,
-                capture_ts: Date.now(),
-                recv_ts: Date.now(),
-                inference_ts: Date.now(),
-                detections
-            };
-            
-            // Send detection results to desktop via socket
-            if (detections.length > 0) {
-                console.log(`📤 Sending ${detections.length} detections to desktop:`, detections.map(d => d.label));
-                this.socket.emit('detection-result', result);
-            } else {
-                console.log('📤 Sending empty detection result to desktop');
-                this.socket.emit('detection-result', result);
-            }
-            
-            this.handleDetectionResult(result);
-            
-        } catch (error) {
-            console.error('❌ Detection error:', error);
-        }
-    }
-
-    captureAndSendFrame() {
+      try {
         const video = document.getElementById('localVideo');
-        if (video.readyState !== 4) return;
+        if (
+          video &&
+          video.readyState >= 2 &&
+          this.detector.modelLoaded
+        ) {
+          const captureTs = Date.now();
+          const detections = await this.detector.detect(video);
+          const inferenceTs = Date.now();
 
-        // Create canvas for frame capture
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        
-        // Use smaller resolution for processing
-        const maxWidth = 640;
-        const maxHeight = 480;
-        
-        const aspectRatio = video.videoWidth / video.videoHeight;
-        let width = Math.min(video.videoWidth, maxWidth);
-        let height = width / aspectRatio;
-        
-        if (height > maxHeight) {
-            height = maxHeight;
-            width = height * aspectRatio;
+          // Draw on phone overlay
+          this.drawDetections(detections);
+
+          // Update local UI
+          this.updateRecentDetections(detections);
+          this.metrics.lastLatency = inferenceTs - captureTs;
+          this.metrics.objectCount = detections.length;
+
+          // Send results to desktop via server
+          this.socket.emit('detection-result', {
+            frame_id: `phone_${Date.now()}`,
+            capture_ts: captureTs,
+            inference_ts: inferenceTs,
+            detections,
+          });
+
+          // Count frames
+          this.socket.emit('frame-count');
+          this.metrics.framesSent++;
         }
-        
-        canvas.width = width;
-        canvas.height = height;
-        
-        // Draw and flip horizontally for front camera
-        if (this.currentCamera === 'user') {
-            ctx.scale(-1, 1);
-            ctx.drawImage(video, -width, 0, width, height);
-        } else {
-            ctx.drawImage(video, 0, 0, width, height);
-        }
-        
-        const frameData = {
-            frame_id: `phone_${++this.frameId}_${Date.now()}`,
-            capture_ts: Date.now(),
-            width: canvas.width,
-            height: canvas.height,
-            imageData: canvas.toDataURL('image/jpeg', 0.7)
-        };
+      } catch (error) {
+        console.error('Detection error:', error);
+      } finally {
+        this.isDetecting = false;
+      }
+    };
 
-        this.socket.emit('video-frame', frameData);
-    }
+    setInterval(runDetection, this.detectionInterval);
+  }
 
-    handleDetectionResult(result) {
-        const latency = Date.now() - result.capture_ts;
-        
-        // Update metrics
-        this.metrics.lastLatency = latency;
-        this.metrics.objectCount = result.detections.length;
-        
-        // Draw overlays
-        this.drawDetections(result.detections);
-        
-        // Update recent detections
-        this.updateRecentDetections(result.detections);
-    }
+  // ── Drawing ──
 
-    drawDetections(detections) {
-        // Clear previous overlays
-        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
-        
-        const rect = this.overlayCanvas.getBoundingClientRect();
-        
-        detections.forEach((detection, index) => {
-            let x = detection.xmin * rect.width;
-            let y = detection.ymin * rect.height;
-            let width = (detection.xmax - detection.xmin) * rect.width;
-            let height = (detection.ymax - detection.ymin) * rect.height;
-            
-            // Flip coordinates for front camera
-            if (this.currentCamera === 'user') {
-                x = rect.width - x - width;
-            }
-            
-            // Draw bounding box
-            this.overlayCtx.strokeStyle = `hsl(${index * 60 + 120}, 100%, 60%)`;
-            this.overlayCtx.lineWidth = 3;
-            this.overlayCtx.strokeRect(x, y, width, height);
-            
-            // Draw label background
-            const label = `${detection.label} ${Math.round(detection.score * 100)}%`;
-            this.overlayCtx.font = 'bold 16px Arial';
-            const textMetrics = this.overlayCtx.measureText(label);
-            
-            this.overlayCtx.fillStyle = `hsla(${index * 60 + 120}, 100%, 60%, 0.9)`;
-            this.overlayCtx.fillRect(x, y - 30, textMetrics.width + 12, 25);
-            
-            // Draw label text
-            this.overlayCtx.fillStyle = 'white';
-            this.overlayCtx.fillText(label, x + 6, y - 10);
+  drawDetections(detections) {
+    this.overlayCtx.clearRect(
+      0,
+      0,
+      this.overlayCanvas.width,
+      this.overlayCanvas.height
+    );
+
+    const rect = this.overlayCanvas.getBoundingClientRect();
+
+    const colors = [
+      '#51cf66', '#339af0', '#fcc419', '#ff6b6b',
+      '#cc5de8', '#20c997', '#ff922b', '#845ef7',
+    ];
+
+    detections.forEach((det, i) => {
+      const color = colors[i % colors.length];
+      let x = det.xmin * rect.width;
+      let y = det.ymin * rect.height;
+      let w = (det.xmax - det.xmin) * rect.width;
+      let h = (det.ymax - det.ymin) * rect.height;
+
+      // Mirror for front camera
+      if (this.currentCamera === 'user') {
+        x = rect.width - x - w;
+      }
+
+      // Bounding box
+      this.overlayCtx.strokeStyle = color;
+      this.overlayCtx.lineWidth = 3;
+      this.overlayCtx.strokeRect(x, y, w, h);
+
+      // Label
+      const label = `${det.label} ${Math.round(det.score * 100)}%`;
+      this.overlayCtx.font = 'bold 14px Inter, Arial, sans-serif';
+      const tm = this.overlayCtx.measureText(label);
+
+      this.overlayCtx.fillStyle = color;
+      this.overlayCtx.fillRect(x, y - 26, tm.width + 12, 22);
+
+      this.overlayCtx.fillStyle = '#fff';
+      this.overlayCtx.fillText(label, x + 6, y - 9);
+    });
+  }
+
+  // ── UI Updates ──
+
+  updateRecentDetections(detections) {
+    const el = document.getElementById('recentDetections');
+    if (!el) return;
+
+    if (detections.length > 0) {
+      const timestamp = new Date().toLocaleTimeString();
+      detections.forEach((d) => {
+        this.recentDetections.unshift({
+          label: d.label,
+          score: d.score,
+          timestamp,
         });
+      });
+      this.recentDetections = this.recentDetections.slice(0, 5);
     }
 
-    updateRecentDetections(detections) {
-        // Only show real detections, no fake data
-        if (detections.length === 0) {
-            // Clear any previous fake detections
-            this.recentDetections = [];
-        } else {
-            // Add real detections with timestamps
-            const timestamp = new Date().toLocaleTimeString();
-            detections.forEach(detection => {
-                this.recentDetections.unshift({
-                    ...detection,
-                    timestamp
-                });
-            });
-            
-            // Keep only last 5 detections
-            this.recentDetections = this.recentDetections.slice(0, 5);
-        }
-        
-        // Update display
-        const recentDetectionsEl = document.getElementById('recentDetections');
-        if (this.recentDetections.length === 0) {
-            recentDetectionsEl.innerHTML = '<div style="color: #999; font-size: 0.7rem;">🔍 Looking for objects... (No fake detections)</div>';
-        } else {
-            recentDetectionsEl.innerHTML = this.recentDetections.map(detection => 
-                `<div class="detection-item">
-                    ✅ ${detection.label} (${Math.round(detection.score * 100)}%)
-                </div>`
-            ).join('');
-        }
+    // Safe DOM update (no innerHTML)
+    el.textContent = '';
+
+    if (this.recentDetections.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color: #999; font-size: 0.7rem;';
+      empty.textContent = '🔍 Looking for objects...';
+      el.appendChild(empty);
+    } else {
+      this.recentDetections.forEach((d) => {
+        const item = document.createElement('div');
+        item.className = 'detection-item';
+        item.textContent = `✅ ${d.label} (${Math.round(d.score * 100)}%)`;
+        el.appendChild(item);
+      });
+    }
+  }
+
+  updateConnectionStatus(state) {
+    const el = document.getElementById('connectionStatus');
+    if (!el) return;
+
+    el.textContent = '';
+    const dot = document.createElement('div');
+    dot.className = 'status-dot';
+    const span = document.createElement('span');
+
+    switch (state) {
+      case 'connected':
+        el.className = 'status-indicator status-connected';
+        span.textContent = 'Connected';
+        break;
+      case 'connecting':
+        el.className = 'status-indicator status-connecting';
+        span.textContent = 'Connecting...';
+        break;
+      default:
+        el.className = 'status-indicator';
+        span.textContent = 'Disconnected';
     }
 
-    updateConnectionStatus(state) {
-        const statusElement = document.getElementById('connectionStatus');
-        
-        switch (state) {
-            case 'connected':
-                statusElement.className = 'status-indicator status-connected';
-                statusElement.innerHTML = '<div class="status-dot"></div><span>Connected</span>';
-                break;
-            case 'connecting':
-                statusElement.className = 'status-indicator status-connecting';
-                statusElement.innerHTML = '<div class="status-dot"></div><span>Connecting...</span>';
-                break;
-            default:
-                statusElement.className = 'status-indicator';
-                statusElement.innerHTML = '<div class="status-dot"></div><span>Disconnected</span>';
-        }
-    }
+    el.appendChild(dot);
+    el.appendChild(span);
+  }
 
-    showCameraView() {
-        document.getElementById('permissionScreen').style.display = 'none';
-        document.getElementById('videoContainer').style.display = 'block';
-        document.getElementById('controlsPanel').style.display = 'flex';
-    }
+  showCameraView() {
+    const perm = document.getElementById('permissionScreen');
+    const video = document.getElementById('videoContainer');
+    const controls = document.getElementById('controlsPanel');
+    if (perm) perm.style.display = 'none';
+    if (video) video.style.display = 'block';
+    if (controls) controls.style.display = 'flex';
+  }
 
-    showError(message) {
-        const errorMessage = document.getElementById('errorMessage');
-        errorMessage.textContent = message;
-        errorMessage.style.display = 'block';
+  showError(message) {
+    const el = document.getElementById('errorMessage');
+    if (el) {
+      el.textContent = message;
+      el.style.display = 'block';
     }
+  }
 
-    getCameraErrorMessage(error) {
-        switch (error.name) {
-            case 'NotAllowedError':
-                return 'Camera permission denied. Please allow camera access and refresh.';
-            case 'NotFoundError':
-                return 'No camera found on this device.';
-            case 'NotSupportedError':
-                return 'Camera not supported in this browser.';
-            case 'SecurityError':
-                return 'Camera access blocked due to security. Try using HTTPS or localhost.';
-            default:
-                if (error.message.includes('getUserMedia')) {
-                    return 'Camera API not available. Please try a different browser or enable camera permissions.';
-                }
-                return `Camera error: ${error.message}. Try refreshing the page.`;
-        }
+  getCameraErrorMessage(error) {
+    switch (error.name) {
+      case 'NotAllowedError':
+        return 'Camera permission denied. Please allow camera access and refresh.';
+      case 'NotFoundError':
+        return 'No camera found on this device.';
+      case 'NotSupportedError':
+        return 'Camera not supported. Ensure you are using HTTPS.';
+      case 'SecurityError':
+        return 'Camera blocked by security policy. Use HTTPS.';
+      default:
+        return `Camera error: ${error.message}`;
     }
+  }
 
-    updateMetricsDisplay() {
-        const updateInterval = () => {
-            document.getElementById('fpsDisplay').textContent = this.metrics.fps;
-            document.getElementById('latencyDisplay').textContent = `${this.metrics.lastLatency}ms`;
-            document.getElementById('objectCountDisplay').textContent = this.metrics.objectCount;
-        };
-        
-        setInterval(updateInterval, 500);
-    }
+  updateMetricsDisplay() {
+    setInterval(() => {
+      const fpsEl = document.getElementById('fpsDisplay');
+      const latEl = document.getElementById('latencyDisplay');
+      const objEl = document.getElementById('objectCountDisplay');
+
+      if (fpsEl) fpsEl.textContent = this.metrics.fps;
+      if (latEl) latEl.textContent = `${this.metrics.lastLatency}ms`;
+      if (objEl) objEl.textContent = this.metrics.objectCount;
+
+      // FPS calculation
+      const now = Date.now();
+      if (now - this.metrics.lastFpsUpdate >= 1000) {
+        this.metrics.fps = this.metrics.framesSent;
+        this.metrics.framesSent = 0;
+        this.metrics.lastFpsUpdate = now;
+      }
+    }, 500);
+  }
 }
 
-// Global functions
+// ── Global Functions ──
+
 async function switchCamera() {
-    if (!window.phoneCamera) return;
-    
-    window.phoneCamera.currentCamera = 
-        window.phoneCamera.currentCamera === 'user' ? 'environment' : 'user';
-    
-    // Stop current stream
-    if (window.phoneCamera.localStream) {
-        window.phoneCamera.localStream.getTracks().forEach(track => track.stop());
+  if (!window.phoneCamera) return;
+
+  window.phoneCamera.currentCamera =
+    window.phoneCamera.currentCamera === 'user' ? 'environment' : 'user';
+
+  if (window.phoneCamera.localStream) {
+    window.phoneCamera.localStream.getTracks().forEach((t) => t.stop());
+  }
+
+  try {
+    const constraints = window.phoneCamera.getCameraConstraints();
+    window.phoneCamera.localStream =
+      await navigator.mediaDevices.getUserMedia(constraints);
+
+    window.phoneCamera.setupLocalVideo();
+
+    const sender = window.phoneCamera.peerConnection
+      .getSenders()
+      .find((s) => s.track && s.track.kind === 'video');
+
+    if (sender) {
+      await sender.replaceTrack(
+        window.phoneCamera.localStream.getVideoTracks()[0]
+      );
     }
-    
-    // Restart with new camera
-    try {
-        const constraints = window.phoneCamera.getCameraConstraints();
-        window.phoneCamera.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-        
-        await window.phoneCamera.setupLocalVideo();
-        
-        // Update WebRTC connection
-        const sender = window.phoneCamera.peerConnection.getSenders().find(s => 
-            s.track && s.track.kind === 'video'
-        );
-        
-        if (sender) {
-            await sender.replaceTrack(window.phoneCamera.localStream.getVideoTracks()[0]);
-        }
-        
-    } catch (error) {
-        console.error('Camera switch failed:', error);
-        alert('Failed to switch camera');
-    }
+  } catch (error) {
+    console.error('Camera switch failed:', error);
+  }
 }
 
 function toggleQuality() {
-    if (!window.phoneCamera) return;
-    
-    window.phoneCamera.isHD = !window.phoneCamera.isHD;
-    const qualityToggle = document.getElementById('qualityToggle');
-    qualityToggle.textContent = window.phoneCamera.isHD ? '📺 SD' : '📺 HD';
-    
-    // Restart camera with new quality
-    switchCamera().then(() => switchCamera()); // Toggle twice to apply new constraints
+  if (!window.phoneCamera) return;
+  window.phoneCamera.isHD = !window.phoneCamera.isHD;
+  const btn = document.getElementById('qualityToggle');
+  if (btn) btn.textContent = window.phoneCamera.isHD ? '📺 SD' : '📺 HD';
+  switchCamera().then(() => switchCamera());
 }
 
 function toggleFullscreen() {
-    if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen();
-    } else {
-        document.exitFullscreen();
-    }
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen().catch(() => {});
+  }
 }
 
 function startCamera() {
-    if (window.phoneCamera) {
-        window.phoneCamera.startCamera();
-    }
+  if (window.phoneCamera) {
+    window.phoneCamera.startCamera();
+  }
 }
 
-// Initialize when page loads
+// ── Initialize ──
 document.addEventListener('DOMContentLoaded', () => {
-    window.phoneCamera = new PhoneCamera();
-    
-    // Auto-start camera on mobile
-    if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
-        // Show start button but don't auto-start for privacy
-        console.log('📱 Mobile device detected');
-    }
+  window.phoneCamera = new PhoneCamera();
 });

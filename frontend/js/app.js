@@ -1,655 +1,692 @@
-// Main Application JavaScript for Desktop Browser
+/**
+ * Desktop Application — WebRTC Object Detection
+ *
+ * Receives video stream from phone via WebRTC,
+ * runs COCO-SSD detection locally on the desktop browser,
+ * and draws bounding box overlays on a canvas.
+ */
 class WebRTCObjectDetection {
-    constructor() {
-        this.socket = io();
-        this.peerConnection = null;
-        this.remoteStream = null;
-        this.overlayCanvas = null;
-        this.overlayCtx = null;
-        this.isWasmMode = true;
-        this.onnxSession = null;
-        this.frameQueue = [];
-        this.isProcessing = false;
-        
-        // Performance tracking
-        this.performanceChart = null;
-        this.latencyHistory = [];
-        this.fpsHistory = [];
-        this.maxHistoryLength = 50;
-        
-        // Metrics tracking
-        this.metrics = {
-            frameCount: 0,
-            processedCount: 0,
-            latencies: [],
-            startTime: Date.now(),
-            lastFpsUpdate: Date.now(),
-            fpsCounter: 0
-        };
-        
-        // Detection persistence for stable display
-        this.lastDetections = [];
-        this.lastDetectionTime = 0;
-        this.detectionDisplayDuration = 2000; // Keep detections visible for 2 seconds
-        this.stableDetectionsList = []; // Stable list for recent detections
-        this.detectionHistory = []; // History of all detections
-        this.lastStableUpdate = 0; // Track last update time
-        
-        // Stable detection list for UI
-        this.stableDetectionList = [];
-        this.lastListUpdate = 0;
-        
-        this.init();
+  constructor() {
+    this.socket = io();
+    this.peerConnection = null;
+    this.remoteStream = null;
+    this.overlayCanvas = null;
+    this.overlayCtx = null;
+    this.roomCode = null;
+    this.detector = window.objectDetector;
+
+    // Detection state
+    this.isDetecting = false;
+    this.detectionLoop = null;
+    this.detectionInterval = 150; // ms between detections (~7 FPS detection)
+
+    // Performance tracking
+    this.latencyHistory = [];
+    this.fpsHistory = [];
+    this.maxHistoryLength = 60;
+
+    this.metrics = {
+      frameCount: 0,
+      processedCount: 0,
+      lastFpsUpdate: Date.now(),
+      fpsCounter: 0,
+      currentFps: 0,
+    };
+
+    // Detection display
+    this.lastDetections = [];
+    this.lastDetectionTime = 0;
+    this.detectionDisplayDuration = 2500;
+    this.detectionHistory = [];
+
+    // Performance chart
+    this.performanceChart = null;
+
+    this.init();
+  }
+
+  async init() {
+    this.setupCanvas();
+    this.setupWebRTC();
+    this.setupSocketEvents();
+    this.generateRoom();
+    this.initPerformanceChart();
+    this.startMetricsUpdate();
+
+    // Load AI model with progress
+    this.showModelLoadingUI();
+    const loaded = await this.detector.loadModel((progress) => {
+      this.updateModelProgress(progress);
+    });
+
+    if (loaded) {
+      this.hideModelLoadingUI();
+    } else {
+      this.showModelError();
     }
+  }
 
-    async init() {
-        await this.setupCanvas();
-        await this.setupWebRTC();
-        await this.setupSocketEvents();
-        await this.loadQRCode();
-        await this.detectMode();
-        
-        if (this.isWasmMode) {
-            await this.initWasmInference();
-        }
-        
-        this.initPerformanceChart();
-        this.startMetricsUpdate();
+  // ── Model Loading UI ──
+
+  showModelLoadingUI() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.style.display = 'block';
+      el.textContent = '🧠 Loading AI model...';
     }
+  }
 
-    async detectMode() {
-        try {
-            const response = await fetch('/api/metrics');
-            const data = await response.json();
-            this.isWasmMode = data.mode === 'wasm';
-            
-            const modeIndicator = document.getElementById('modeIndicator');
-            modeIndicator.textContent = this.isWasmMode ? 'WASM Mode' : 'Server Mode';
-            modeIndicator.style.background = this.isWasmMode ? 'rgba(46, 213, 115, 0.3)' : 'rgba(55, 66, 250, 0.3)';
-        } catch (error) {
-            console.warn('Could not detect mode, defaulting to WASM');
-        }
+  updateModelProgress(progress) {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = `🧠 Loading AI model... ${progress}%`;
     }
+  }
 
-    setupCanvas() {
-        this.overlayCanvas = document.getElementById('overlayCanvas');
-        this.overlayCtx = this.overlayCanvas.getContext('2d');
-        
-        // Setup canvas for high DPI displays
-        const rect = this.overlayCanvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        
-        this.overlayCanvas.width = rect.width * dpr;
-        this.overlayCanvas.height = rect.height * dpr;
-        this.overlayCtx.scale(dpr, dpr);
+  hideModelLoadingUI() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = '✅ AI model ready';
+      setTimeout(() => {
+        el.style.display = 'none';
+      }, 2000);
     }
+  }
 
-    async setupWebRTC() {
-        const configuration = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        };
-
-        this.peerConnection = new RTCPeerConnection(configuration);
-
-        // Handle incoming stream
-        this.peerConnection.ontrack = (event) => {
-            console.log('📺 Received remote stream');
-            this.remoteStream = event.streams[0];
-            this.setupRemoteVideo();
-        };
-
-        // Handle connection state changes
-        this.peerConnection.onconnectionstatechange = () => {
-            const state = this.peerConnection.connectionState;
-            console.log('🔗 Connection state:', state);
-            this.updateConnectionStatus(state);
-        };
-
-        // Handle ICE candidates
-        this.peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                this.socket.emit('ice-candidate', event.candidate);
-            }
-        };
+  showModelError() {
+    const el = document.getElementById('modelStatus');
+    if (el) {
+      el.textContent = '❌ Failed to load AI model. Refresh to retry.';
+      el.style.background = 'rgba(255, 71, 87, 0.4)';
     }
+  }
 
-    setupSocketEvents() {
-        this.socket.on('offer', async (offer) => {
-            console.log('📞 Received offer');
-            await this.peerConnection.setRemoteDescription(offer);
-            
-            const answer = await this.peerConnection.createAnswer();
-            await this.peerConnection.setLocalDescription(answer);
-            
-            this.socket.emit('answer', answer);
-        });
+  // ── Canvas Setup ──
 
-        this.socket.on('ice-candidate', async (candidate) => {
-            try {
-                await this.peerConnection.addIceCandidate(candidate);
-            } catch (error) {
-                console.error('Error adding ICE candidate:', error);
-            }
-        });
+  setupCanvas() {
+    this.overlayCanvas = document.getElementById('overlayCanvas');
+    this.overlayCtx = this.overlayCanvas.getContext('2d');
+  }
 
-        this.socket.on('detection-result', (result) => {
-            this.handleDetectionResult(result);
-        });
+  resizeCanvas() {
+    const video = document.getElementById('remoteVideo');
+    const rect = video.getBoundingClientRect();
 
-        this.socket.on('process-frame-wasm', (frameInfo) => {
-            if (this.isWasmMode && this.remoteStream) {
-                this.processFrameWasm(frameInfo);
-            }
-        });
+    this.overlayCanvas.style.width = rect.width + 'px';
+    this.overlayCanvas.style.height = rect.height + 'px';
+
+    const dpr = window.devicePixelRatio || 1;
+    this.overlayCanvas.width = rect.width * dpr;
+    this.overlayCanvas.height = rect.height * dpr;
+    this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // ── Room & QR Code ──
+
+  async generateRoom() {
+    try {
+      const response = await fetch('/api/qr');
+      const data = await response.json();
+
+      this.roomCode = data.roomCode;
+
+      // Join room as desktop
+      this.socket.emit('join-room', {
+        roomCode: this.roomCode,
+        role: 'desktop',
+      });
+
+      // Display QR code
+      const qrEl = document.getElementById('qrCode');
+      if (qrEl) {
+        const img = document.createElement('img');
+        img.src = data.qr;
+        img.alt = 'Scan to connect phone';
+        qrEl.innerHTML = '';
+        qrEl.appendChild(img);
+      }
+
+      const urlEl = document.getElementById('connectionUrl');
+      if (urlEl) {
+        urlEl.textContent = data.url;
+      }
+
+      const roomEl = document.getElementById('roomCode');
+      if (roomEl) {
+        roomEl.textContent = this.roomCode;
+      }
+    } catch (error) {
+      console.error('Failed to generate room:', error);
     }
+  }
 
-    setupRemoteVideo() {
-        const remoteVideo = document.getElementById('remoteVideo');
-        const loadingIndicator = document.getElementById('loadingIndicator');
-        
-        remoteVideo.srcObject = this.remoteStream;
-        remoteVideo.style.display = 'block';
-        loadingIndicator.style.display = 'none';
+  // ── WebRTC ──
 
-        // Update canvas size when video loads
-        remoteVideo.onloadedmetadata = () => {
-            this.resizeCanvas();
-            this.startFrameCapture();
-            this.startPersistentDisplay();
-        };
+  setupWebRTC() {
+    const config = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
+    };
 
-        remoteVideo.onresize = () => {
-            this.resizeCanvas();
-        };
-    }
+    this.peerConnection = new RTCPeerConnection(config);
 
-    resizeCanvas() {
-        const remoteVideo = document.getElementById('remoteVideo');
-        const rect = remoteVideo.getBoundingClientRect();
-        
-        this.overlayCanvas.style.width = rect.width + 'px';
-        this.overlayCanvas.style.height = rect.height + 'px';
-        
-        const dpr = window.devicePixelRatio || 1;
-        this.overlayCanvas.width = rect.width * dpr;
-        this.overlayCanvas.height = rect.height * dpr;
-        this.overlayCtx.scale(dpr, dpr);
-    }
+    this.peerConnection.ontrack = (event) => {
+      console.log('📺 Received remote video stream');
+      this.remoteStream = event.streams[0];
+      this.setupRemoteVideo();
+    };
 
-    async initWasmInference() {
-        try {
-            console.log('🧠 Initializing WASM inference...');
-            
-            // Initialize ONNX Runtime
-            ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/';
-            
-            // Load model (placeholder - replace with actual model)
-            // For now, we'll use mock inference
-            console.log('✅ WASM inference initialized');
-        } catch (error) {
-            console.error('❌ Failed to initialize WASM inference:', error);
-        }
-    }
+    this.peerConnection.onconnectionstatechange = () => {
+      const state = this.peerConnection.connectionState;
+      console.log('🔗 Connection state:', state);
+      this.updateConnectionStatus(state);
+    };
 
-    startFrameCapture() {
-        // Capture frames from video for processing
-        const captureFrame = () => {
-            if (!this.remoteStream) return;
+    this.peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        this.socket.emit('ice-candidate', event.candidate);
+      }
+    };
+  }
 
-            const video = document.getElementById('remoteVideo');
-            if (video.readyState !== 4) return; // Not ready
+  // ── Socket Events ──
 
-            // Create frame data
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            canvas.width = Math.min(video.videoWidth, 640);
-            canvas.height = Math.min(video.videoHeight, 480);
-            
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            const frameData = {
-                frame_id: `frame_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                capture_ts: Date.now(),
-                width: canvas.width,
-                height: canvas.height,
-                imageData: canvas.toDataURL('image/jpeg', 0.8)
-            };
-
-            this.metrics.frameCount++;
-            this.socket.emit('video-frame', frameData);
-        };
-
-        // Capture at ~15 FPS
-        setInterval(captureFrame, 66);
-    }
-
-    async processFrameWasm(frameInfo) {
-        if (this.isProcessing) return;
-        
-        this.isProcessing = true;
-        
-        try {
-            // REAL WASM inference - NO FAKE DATA
-            const detections = []; // Empty array - no fake detections
-            console.log('🚫 Mock detection disabled - no fake bicycle/cat/dog data');
-            
-            const result = {
-                ...frameInfo,
-                inference_ts: Date.now(),
-                detections
-            };
-            
-            this.handleDetectionResult(result);
-        } catch (error) {
-            console.error('WASM processing error:', error);
-        } finally {
-            this.isProcessing = false;
-        }
-    }
-
-    async mockWasmInference() {
-        // COMPLETELY DISABLED - NO MORE FAKE DETECTIONS
-        console.log('🚫 Fake detection function disabled - returning empty array');
-        return []; // NO MORE bicycle, cat, dog fake detections
-    }
-
-    handleDetectionResult(result) {
-        const now = Date.now();
-        const latency = now - result.capture_ts;
-        
-        // Update metrics
-        this.metrics.processedCount++;
-        this.metrics.latencies.push(latency);
-        this.metrics.fpsCounter++;
-        
-        // Store detections with timestamp for persistence
-        if (result.detections && result.detections.length > 0) {
-            this.lastDetections = result.detections;
-            this.lastDetectionTime = now;
-            console.log(`📱 New detections stored: ${result.detections.length} objects`);
-        }
-        
-        // Draw current or persistent detections
-        this.drawPersistentDetections();
-        
-        // Update detection list
-        this.updateDetectionList(result.detections);
-        
-        // Update live metrics display
-        this.updateLiveMetrics(latency, result.detections.length);
-    }
-
-    drawPersistentDetections() {
-        const now = Date.now();
-        const timeSinceLastDetection = now - this.lastDetectionTime;
-        
-        // Clear previous overlays
-        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
-        
-        // Show detections if within display duration
-        if (timeSinceLastDetection < this.detectionDisplayDuration && this.lastDetections.length > 0) {
-            // Calculate fade effect for last 500ms
-            const fadeStartTime = this.detectionDisplayDuration - 500;
-            let opacity = 1.0;
-            if (timeSinceLastDetection > fadeStartTime) {
-                opacity = 1.0 - ((timeSinceLastDetection - fadeStartTime) / 500);
-            }
-            
-            this.drawDetections(this.lastDetections, opacity);
-        }
-    }
-
-    drawDetections(detections, opacity = 1.0) {
-        const rect = this.overlayCanvas.getBoundingClientRect();
-        
-        // Set global opacity for fading effect
-        this.overlayCtx.globalAlpha = opacity;
-        
-        detections.forEach((detection, index) => {
-            const x = detection.xmin * rect.width;
-            const y = detection.ymin * rect.height;
-            const width = (detection.xmax - detection.xmin) * rect.width;
-            const height = (detection.ymax - detection.ymin) * rect.height;
-            
-            // Draw bounding box
-            this.overlayCtx.strokeStyle = `hsl(${index * 60}, 100%, 50%)`;
-            this.overlayCtx.lineWidth = 2;
-            this.overlayCtx.strokeRect(x, y, width, height);
-            
-            // Draw label background
-            const label = `${detection.label} (${Math.round(detection.score * 100)}%)`;
-            this.overlayCtx.font = '14px Arial';
-            const textMetrics = this.overlayCtx.measureText(label);
-            
-            this.overlayCtx.fillStyle = `hsla(${index * 60}, 100%, 50%, 0.8)`;
-            this.overlayCtx.fillRect(x, y - 25, textMetrics.width + 10, 20);
-            
-            // Draw label text
-            this.overlayCtx.fillStyle = 'white';
-            this.overlayCtx.fillText(label, x + 5, y - 8);
-        });
-        
-        // Reset opacity after drawing
-        this.overlayCtx.globalAlpha = 1.0;
-    }
-
-    startPersistentDisplay() {
-        // Continuously update display to handle persistence and fading
-        const updateDisplay = () => {
-            this.drawPersistentDetections();
-            requestAnimationFrame(updateDisplay);
-        };
-        requestAnimationFrame(updateDisplay);
-    }
-
-    updateDetectionList(detections) {
-        const now = Date.now();
-        
-        // Add new detections to history with timestamps
-        detections.forEach(detection => {
-            this.detectionHistory.push({
-                label: detection.label || detection.class,
-                confidence: detection.score || detection.confidence,
-                timestamp: now
-            });
-        });
-        
-        // Keep only recent detections (last 10 seconds)
-        this.detectionHistory = this.detectionHistory.filter(d => 
-            now - d.timestamp < 10000
+  setupSocketEvents() {
+    this.socket.on('offer', async (offer) => {
+      console.log('📞 Received offer from phone');
+      try {
+        await this.peerConnection.setRemoteDescription(
+          new RTCSessionDescription(offer)
         );
-        
-        // Update stable list only if there are meaningful changes
-        const newLabels = detections.map(d => d.label || d.class).sort().join(',');
-        const currentLabels = this.stableDetectionsList.map(d => d.label).sort().join(',');
-        
-        if (newLabels !== currentLabels || now - this.lastStableUpdate > 1000) {
-            // Get unique detections from recent history
-            const uniqueDetections = [];
-            const seenLabels = new Set();
-            
-            // Sort by timestamp (newest first) and take unique labels
-            this.detectionHistory
-                .sort((a, b) => b.timestamp - a.timestamp)
-                .forEach(detection => {
-                    if (!seenLabels.has(detection.label)) {
-                        seenLabels.add(detection.label);
-                        uniqueDetections.push(detection);
-                    }
-                });
-            
-            this.stableDetectionsList = uniqueDetections.slice(0, 5); // Keep top 5
-            this.lastStableUpdate = now;
-            
-            // Update the display
-            const detectionList = document.getElementById('detectionList');
-            if (detectionList) {
-                if (this.stableDetectionsList.length === 0) {
-                    detectionList.innerHTML = '<div style="color: #999; text-align: center; padding: 20px;">No recent detections</div>';
-                } else {
-                    detectionList.innerHTML = this.stableDetectionsList.map(detection => 
-                        `<div class="detection-item">
-                            ${detection.label} - ${Math.round(detection.confidence * 100)}%
-                        </div>`
-                    ).join('');
-                }
-            }
+        const answer = await this.peerConnection.createAnswer();
+        await this.peerConnection.setLocalDescription(answer);
+        this.socket.emit('answer', answer);
+      } catch (error) {
+        console.error('Error handling offer:', error);
+      }
+    });
+
+    this.socket.on('ice-candidate', async (candidate) => {
+      try {
+        await this.peerConnection.addIceCandidate(
+          new RTCIceCandidate(candidate)
+        );
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    });
+
+    // Receive detection results from phone
+    this.socket.on('detection-result', (result) => {
+      if (result && Array.isArray(result.detections)) {
+        this.handleDetectionResult(result);
+      }
+    });
+
+    this.socket.on('peer-joined', (data) => {
+      console.log(`📱 ${data.role} joined the room`);
+    });
+
+    this.socket.on('peer-left', (data) => {
+      console.log(`📱 ${data.role} left the room`);
+      this.updateConnectionStatus('disconnected');
+    });
+  }
+
+  // ── Remote Video ──
+
+  setupRemoteVideo() {
+    const video = document.getElementById('remoteVideo');
+    const loading = document.getElementById('loadingIndicator');
+
+    video.srcObject = this.remoteStream;
+    video.style.display = 'block';
+    if (loading) loading.style.display = 'none';
+
+    video.onloadedmetadata = () => {
+      this.resizeCanvas();
+      this.startDetectionLoop();
+      this.startPersistentDisplay();
+    };
+
+    video.onresize = () => this.resizeCanvas();
+  }
+
+  // ── Detection Loop (runs on desktop) ──
+
+  startDetectionLoop() {
+    if (this.detectionLoop) return;
+
+    const runDetection = async () => {
+      if (this.isDetecting) return;
+      this.isDetecting = true;
+
+      try {
+        const video = document.getElementById('remoteVideo');
+        if (video && video.readyState >= 2 && this.detector.modelLoaded) {
+          const captureTs = Date.now();
+          const detections = await this.detector.detect(video);
+
+          this.metrics.processedCount++;
+          this.metrics.fpsCounter++;
+
+          const result = {
+            capture_ts: captureTs,
+            inference_ts: Date.now(),
+            detections,
+          };
+
+          this.handleDetectionResult(result);
         }
+      } catch (error) {
+        console.error('Detection loop error:', error);
+      } finally {
+        this.isDetecting = false;
+      }
+    };
+
+    this.detectionLoop = setInterval(runDetection, this.detectionInterval);
+  }
+
+  // ── Handle Detection Results ──
+
+  handleDetectionResult(result) {
+    const now = Date.now();
+    const latency = result.inference_ts
+      ? result.inference_ts - result.capture_ts
+      : 0;
+
+    // Update metrics
+    this.metrics.processedCount++;
+    this.metrics.fpsCounter++;
+
+    // Track latency
+    this.latencyHistory.push(latency);
+    if (this.latencyHistory.length > this.maxHistoryLength) {
+      this.latencyHistory.shift();
     }
 
-    updateLiveMetrics(latency, objectCount) {
-        document.getElementById('latencyMetric').textContent = `${latency}ms`;
-        document.getElementById('objectsMetric').textContent = objectCount;
-        
-        // Add to performance history
-        this.latencyHistory.push(latency);
-        if (this.latencyHistory.length > this.maxHistoryLength) {
-            this.latencyHistory.shift();
-        }
-        
-        // Update FPS every second
-        const now = Date.now();
-        if (now - this.metrics.lastFpsUpdate >= 1000) {
-            const fps = this.metrics.fpsCounter;
-            document.getElementById('fpsMetric').textContent = `${fps} fps`;
-            document.getElementById('processedMetric').textContent = this.metrics.processedCount;
-            
-            // Add FPS to history
-            this.fpsHistory.push(fps);
-            if (this.fpsHistory.length > this.maxHistoryLength) {
-                this.fpsHistory.shift();
-            }
-            
-            // Update performance chart if visible
-            if (this.performanceChart) {
-                this.updatePerformanceChart();
-            }
-            
-            this.metrics.fpsCounter = 0;
-            this.metrics.lastFpsUpdate = now;
-        }
+    // Store detections for persistent display
+    if (result.detections && result.detections.length > 0) {
+      this.lastDetections = result.detections;
+      this.lastDetectionTime = now;
     }
 
-    initPerformanceChart() {
-        const canvas = document.getElementById('latencyChart');
-        const ctx = canvas.getContext('2d');
-        
-        this.performanceChart = {
-            canvas,
-            ctx,
-            width: canvas.width,
-            height: canvas.height
-        };
+    // Draw overlays
+    this.drawPersistentDetections();
+
+    // Update UI
+    this.updateDetectionList(result.detections || []);
+    this.updateLiveMetrics(latency, (result.detections || []).length);
+  }
+
+  // ── Drawing ──
+
+  drawPersistentDetections() {
+    const now = Date.now();
+    const elapsed = now - this.lastDetectionTime;
+
+    this.overlayCtx.clearRect(
+      0,
+      0,
+      this.overlayCanvas.width,
+      this.overlayCanvas.height
+    );
+
+    if (
+      elapsed < this.detectionDisplayDuration &&
+      this.lastDetections.length > 0
+    ) {
+      const fadeStart = this.detectionDisplayDuration - 500;
+      let opacity = 1.0;
+      if (elapsed > fadeStart) {
+        opacity = 1.0 - (elapsed - fadeStart) / 500;
+      }
+      this.drawDetections(this.lastDetections, opacity);
+    }
+  }
+
+  drawDetections(detections, opacity = 1.0) {
+    const rect = this.overlayCanvas.getBoundingClientRect();
+    this.overlayCtx.globalAlpha = opacity;
+
+    // Color palette for different classes
+    const colors = [
+      '#ff6b6b', '#51cf66', '#339af0', '#fcc419',
+      '#cc5de8', '#20c997', '#ff922b', '#845ef7',
+      '#f06595', '#22b8cf', '#fab005', '#7950f2',
+    ];
+
+    detections.forEach((det, i) => {
+      const color = colors[i % colors.length];
+      const x = det.xmin * rect.width;
+      const y = det.ymin * rect.height;
+      const w = (det.xmax - det.xmin) * rect.width;
+      const h = (det.ymax - det.ymin) * rect.height;
+
+      // Bounding box
+      this.overlayCtx.strokeStyle = color;
+      this.overlayCtx.lineWidth = 2.5;
+      this.overlayCtx.strokeRect(x, y, w, h);
+
+      // Corner accents
+      const cornerLen = Math.min(w, h) * 0.15;
+      this.overlayCtx.lineWidth = 4;
+      // Top-left
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(x, y + cornerLen);
+      this.overlayCtx.lineTo(x, y);
+      this.overlayCtx.lineTo(x + cornerLen, y);
+      this.overlayCtx.stroke();
+      // Top-right
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(x + w - cornerLen, y);
+      this.overlayCtx.lineTo(x + w, y);
+      this.overlayCtx.lineTo(x + w, y + cornerLen);
+      this.overlayCtx.stroke();
+      // Bottom-left
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(x, y + h - cornerLen);
+      this.overlayCtx.lineTo(x, y + h);
+      this.overlayCtx.lineTo(x + cornerLen, y + h);
+      this.overlayCtx.stroke();
+      // Bottom-right
+      this.overlayCtx.beginPath();
+      this.overlayCtx.moveTo(x + w - cornerLen, y + h);
+      this.overlayCtx.lineTo(x + w, y + h);
+      this.overlayCtx.lineTo(x + w, y + h - cornerLen);
+      this.overlayCtx.stroke();
+
+      // Label
+      const label = `${det.label} ${Math.round(det.score * 100)}%`;
+      this.overlayCtx.font = 'bold 13px Inter, Arial, sans-serif';
+      const tm = this.overlayCtx.measureText(label);
+      const labelH = 22;
+      const labelY = y > labelH + 4 ? y - labelH - 2 : y + 2;
+
+      this.overlayCtx.fillStyle = color;
+      this.overlayCtx.beginPath();
+      this.roundRect(x, labelY, tm.width + 12, labelH, 4);
+      this.overlayCtx.fill();
+
+      this.overlayCtx.fillStyle = '#fff';
+      this.overlayCtx.fillText(label, x + 6, labelY + 15);
+    });
+
+    this.overlayCtx.globalAlpha = 1.0;
+  }
+
+  roundRect(x, y, w, h, r) {
+    this.overlayCtx.moveTo(x + r, y);
+    this.overlayCtx.lineTo(x + w - r, y);
+    this.overlayCtx.quadraticCurveTo(x + w, y, x + w, y + r);
+    this.overlayCtx.lineTo(x + w, y + h - r);
+    this.overlayCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    this.overlayCtx.lineTo(x + r, y + h);
+    this.overlayCtx.quadraticCurveTo(x, y + h, x, y + h - r);
+    this.overlayCtx.lineTo(x, y + r);
+    this.overlayCtx.quadraticCurveTo(x, y, x + r, y);
+  }
+
+  startPersistentDisplay() {
+    const update = () => {
+      this.drawPersistentDetections();
+      requestAnimationFrame(update);
+    };
+    requestAnimationFrame(update);
+  }
+
+  // ── Detection List UI ──
+
+  updateDetectionList(detections) {
+    const now = Date.now();
+
+    detections.forEach((d) => {
+      this.detectionHistory.push({
+        label: d.label,
+        confidence: d.score,
+        timestamp: now,
+      });
+    });
+
+    // Keep last 10s
+    this.detectionHistory = this.detectionHistory.filter(
+      (d) => now - d.timestamp < 10_000
+    );
+
+    // Unique labels, newest first
+    const seen = new Set();
+    const unique = [];
+    for (const d of [...this.detectionHistory].reverse()) {
+      if (!seen.has(d.label)) {
+        seen.add(d.label);
+        unique.push(d);
+      }
     }
 
-    updatePerformanceChart() {
-        if (!this.performanceChart) return;
-        
-        const { ctx, width, height } = this.performanceChart;
-        
-        // Clear canvas
-        ctx.clearRect(0, 0, width, height);
-        
-        // Draw grid
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-        ctx.lineWidth = 1;
-        
-        // Horizontal grid lines
-        for (let i = 0; i <= 5; i++) {
-            const y = (height * i) / 5;
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(width, y);
-            ctx.stroke();
-        }
-        
-        // Vertical grid lines
-        for (let i = 0; i <= 10; i++) {
-            const x = (width * i) / 10;
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, height);
-            ctx.stroke();
-        }
-        
-        // Draw latency line
-        if (this.latencyHistory.length > 1) {
-            const maxLatency = Math.max(...this.latencyHistory, 200);
-            
-            ctx.strokeStyle = '#ff6b6b';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            
-            this.latencyHistory.forEach((latency, index) => {
-                const x = (width * index) / (this.maxHistoryLength - 1);
-                const y = height - (height * latency) / maxLatency;
-                
-                if (index === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-            });
-            
-            ctx.stroke();
-        }
-        
-        // Draw FPS line
-        if (this.fpsHistory.length > 1) {
-            const maxFPS = Math.max(...this.fpsHistory, 30);
-            
-            ctx.strokeStyle = '#51cf66';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            
-            this.fpsHistory.forEach((fps, index) => {
-                const x = (width * index) / (this.maxHistoryLength - 1);
-                const y = height - (height * fps) / maxFPS;
-                
-                if (index === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-            });
-            
-            ctx.stroke();
-        }
-        
-        // Draw labels
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        ctx.font = '10px Arial';
-        ctx.fillText('Latency (red)', 5, 15);
-        ctx.fillText('FPS (green)', 5, 30);
+    const listEl = document.getElementById('detectionList');
+    if (!listEl) return;
+
+    if (unique.length === 0) {
+      listEl.textContent = '';
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color: #999; text-align: center; padding: 20px;';
+      empty.textContent = 'No recent detections';
+      listEl.appendChild(empty);
+    } else {
+      listEl.textContent = '';
+      unique.slice(0, 6).forEach((d) => {
+        const item = document.createElement('div');
+        item.className = 'detection-item';
+        item.textContent = `${d.label} — ${Math.round(d.confidence * 100)}%`;
+        listEl.appendChild(item);
+      });
+    }
+  }
+
+  // ── Metrics UI ──
+
+  updateLiveMetrics(latency, objectCount) {
+    const latencyEl = document.getElementById('latencyMetric');
+    const objectsEl = document.getElementById('objectsMetric');
+    if (latencyEl) latencyEl.textContent = `${latency}ms`;
+    if (objectsEl) objectsEl.textContent = objectCount;
+
+    const now = Date.now();
+    if (now - this.metrics.lastFpsUpdate >= 1000) {
+      const fps = this.metrics.fpsCounter;
+      const fpsEl = document.getElementById('fpsMetric');
+      const processedEl = document.getElementById('processedMetric');
+      if (fpsEl) fpsEl.textContent = `${fps} fps`;
+      if (processedEl) processedEl.textContent = this.metrics.processedCount;
+
+      this.fpsHistory.push(fps);
+      if (this.fpsHistory.length > this.maxHistoryLength) {
+        this.fpsHistory.shift();
+      }
+
+      this.metrics.currentFps = fps;
+      this.metrics.fpsCounter = 0;
+      this.metrics.lastFpsUpdate = now;
+
+      if (this.performanceChart) this.updatePerformanceChart();
+    }
+  }
+
+  updateConnectionStatus(state) {
+    const el = document.getElementById('connectionStatus');
+    if (!el) return;
+
+    const map = {
+      connected: ['status-connected', '📱 Connected'],
+      connecting: ['status-connecting', '📱 Connecting...'],
+    };
+    const [cls, text] = map[state] || [
+      'status-disconnected',
+      '📱 Disconnected',
+    ];
+    el.className = `connection-status ${cls}`;
+    el.textContent = text;
+  }
+
+  // ── Performance Chart ──
+
+  initPerformanceChart() {
+    const canvas = document.getElementById('latencyChart');
+    if (!canvas) return;
+    this.performanceChart = {
+      canvas,
+      ctx: canvas.getContext('2d'),
+      width: canvas.width,
+      height: canvas.height,
+    };
+  }
+
+  updatePerformanceChart() {
+    if (!this.performanceChart) return;
+    const { ctx, width, height } = this.performanceChart;
+
+    ctx.clearRect(0, 0, width, height);
+
+    // Grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+      const y = (height * i) / 5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
     }
 
-    updateConnectionStatus(state) {
-        const statusElement = document.getElementById('connectionStatus');
-        
-        switch (state) {
-            case 'connected':
-                statusElement.className = 'connection-status status-connected';
-                statusElement.textContent = '📱 Connected';
-                break;
-            case 'connecting':
-                statusElement.className = 'connection-status status-connecting';
-                statusElement.textContent = '📱 Connecting...';
-                break;
-            default:
-                statusElement.className = 'connection-status status-disconnected';
-                statusElement.textContent = '📱 Disconnected';
-        }
+    // Latency line
+    if (this.latencyHistory.length > 1) {
+      const max = Math.max(...this.latencyHistory, 200);
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      this.latencyHistory.forEach((v, i) => {
+        const x = (width * i) / (this.maxHistoryLength - 1);
+        const y = height - (height * v) / max;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
     }
 
-    async loadQRCode() {
-        try {
-            const response = await fetch('/api/qr');
-            const data = await response.json();
-            
-            const qrCode = document.getElementById('qrCode');
-            const connectionUrl = document.getElementById('connectionUrl');
-            
-            qrCode.innerHTML = `<img src="${data.qr}" alt="QR Code">`;
-            connectionUrl.textContent = data.url + '/phone';
-        } catch (error) {
-            console.error('Failed to load QR code:', error);
-        }
+    // FPS line
+    if (this.fpsHistory.length > 1) {
+      const max = Math.max(...this.fpsHistory, 30);
+      ctx.strokeStyle = '#51cf66';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      this.fpsHistory.forEach((v, i) => {
+        const x = (width * i) / (this.maxHistoryLength - 1);
+        const y = height - (height * v) / max;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
     }
 
-    startMetricsUpdate() {
-        setInterval(async () => {
-            try {
-                const response = await fetch('/api/metrics');
-                const data = await response.json();
-                // Update any server-side metrics if needed
-            } catch (error) {
-                console.error('Failed to fetch metrics:', error);
-            }
-        }, 5000);
-    }
+    // Labels
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '10px Inter, Arial, sans-serif';
+    ctx.fillText('Latency (red)', 5, 14);
+    ctx.fillText('FPS (green)', 5, 28);
+  }
+
+  startMetricsUpdate() {
+    // Lightweight periodic server metrics fetch
+    setInterval(async () => {
+      try {
+        await fetch('/api/metrics');
+      } catch {
+        // Ignore fetch errors silently
+      }
+    }, 10_000);
+  }
 }
 
-// Global functions for buttons
+// ── Global Button Handlers ──
+
 async function runBenchmark() {
-    const btn = document.getElementById('benchmarkBtn');
-    const originalText = btn.textContent;
-    
-    btn.textContent = '⏱️ Running...';
-    btn.disabled = true;
-    
-    try {
-        // Reset metrics first
-        await fetch('/api/reset-metrics');
-        
-        // Run for 30 seconds
-        await new Promise(resolve => setTimeout(resolve, 30000));
-        
-        // Get final metrics
-        const response = await fetch('/api/metrics');
-        const metrics = await response.json();
-        
-        // Download results
-        const blob = new Blob([JSON.stringify(metrics, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'metrics.json';
-        a.click();
-        
-        alert(`Benchmark complete!\nMedian latency: ${metrics.median_latency_ms}ms\nP95 latency: ${metrics.p95_latency_ms}ms\nProcessed FPS: ${metrics.processed_fps}`);
-        
-    } catch (error) {
-        console.error('Benchmark failed:', error);
-        alert('Benchmark failed. Please try again.');
-    } finally {
-        btn.textContent = originalText;
-        btn.disabled = false;
-    }
+  const btn = document.getElementById('benchmarkBtn');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.textContent = '⏱️ Running (30s)...';
+  btn.disabled = true;
+
+  try {
+    await fetch('/api/reset-metrics', { method: 'POST' });
+    await new Promise((r) => setTimeout(r, 30_000));
+
+    const res = await fetch('/api/metrics');
+    const data = await res.json();
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'metrics.json';
+    a.click();
+    URL.revokeObjectURL(url);
+
+    alert(
+      `Benchmark complete!\n` +
+      `Median latency: ${data.median_latency_ms}ms\n` +
+      `P95 latency: ${data.p95_latency_ms}ms\n` +
+      `FPS: ${data.processed_fps}`
+    );
+  } catch (error) {
+    console.error('Benchmark failed:', error);
+    alert('Benchmark failed. Is the server running?');
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
 }
 
 async function resetMetrics() {
-    try {
-        await fetch('/api/reset-metrics');
-        alert('Metrics reset successfully!');
-    } catch (error) {
-        console.error('Failed to reset metrics:', error);
-    }
+  try {
+    await fetch('/api/reset-metrics', { method: 'POST' });
+  } catch (error) {
+    console.error('Failed to reset metrics:', error);
+  }
 }
 
 async function downloadMetrics() {
-    try {
-        const response = await fetch('/api/metrics');
-        const metrics = await response.json();
-        
-        const blob = new Blob([JSON.stringify(metrics, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'metrics.json';
-        a.click();
-    } catch (error) {
-        console.error('Failed to download metrics:', error);
-    }
+  try {
+    const res = await fetch('/api/metrics');
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'metrics.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Failed to download metrics:', error);
+  }
 }
 
 function togglePerformanceChart() {
-    const chartDiv = document.getElementById('performanceChart');
-    const btn = document.getElementById('performanceBtn');
-    
-    if (chartDiv.style.display === 'none') {
-        chartDiv.style.display = 'block';
-        btn.textContent = '📈 Hide Chart';
-    } else {
-        chartDiv.style.display = 'none';
-        btn.textContent = '📈 Performance Chart';
-    }
+  const chart = document.getElementById('performanceChart');
+  const btn = document.getElementById('performanceBtn');
+  if (!chart || !btn) return;
+  const visible = chart.style.display !== 'none';
+  chart.style.display = visible ? 'none' : 'block';
+  btn.textContent = visible ? '📈 Performance Chart' : '📈 Hide Chart';
 }
 
-// Initialize application when page loads
+// ── Initialize ──
 document.addEventListener('DOMContentLoaded', () => {
-    new WebRTCObjectDetection();
+  new WebRTCObjectDetection();
 });

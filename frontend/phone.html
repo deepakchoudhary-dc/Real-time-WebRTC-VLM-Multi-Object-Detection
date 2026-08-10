@@ -2,20 +2,21 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Phone Camera - Object Detection</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="description" content="Phone camera for real-time object detection via WebRTC">
+    <title>Camera — Object Detection</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Arial', sans-serif;
-            background: #1a1a1a;
-            color: white;
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #0a0a14;
+            color: #fff;
             overflow: hidden;
+            touch-action: manipulation;
         }
 
         .phone-container {
@@ -26,6 +27,7 @@
             flex-direction: column;
         }
 
+        /* ── Video ── */
         .video-container {
             flex: 1;
             position: relative;
@@ -33,27 +35,23 @@
         }
 
         #localVideo {
-            width: 100%;
-            height: 100%;
+            width: 100%; height: 100%;
             object-fit: cover;
         }
 
         .overlay-canvas {
             position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             pointer-events: none;
         }
 
+        /* ── Controls ── */
         .controls-panel {
             position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
-            padding: 20px;
+            bottom: 0; left: 0; right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0.3), transparent);
+            padding: 40px 20px 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -62,143 +60,151 @@
         .status-indicator {
             display: flex;
             align-items: center;
-            gap: 10px;
-            font-size: 0.9rem;
+            gap: 8px;
+            font-size: 0.82rem;
         }
 
         .status-dot {
-            width: 12px;
-            height: 12px;
+            width: 10px; height: 10px;
             border-radius: 50%;
             background: #ff4757;
             animation: pulse 2s infinite;
         }
 
-        .status-connected .status-dot {
-            background: #2ed573;
-        }
-
-        .status-connecting .status-dot {
-            background: #ffa502;
-        }
+        .status-connected .status-dot { background: #51cf66; }
+        .status-connecting .status-dot { background: #ffa502; }
 
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
         }
 
-        .control-buttons {
-            display: flex;
-            gap: 15px;
-        }
+        .control-buttons { display: flex; gap: 12px; }
 
         .btn {
-            padding: 12px 16px;
+            padding: 10px 16px;
             border: none;
-            border-radius: 25px;
+            border-radius: 20px;
             cursor: pointer;
-            font-weight: bold;
-            transition: all 0.3s;
-            backdrop-filter: blur(10px);
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 0.78rem;
+            transition: all 0.2s;
         }
 
-        .btn-primary {
-            background: rgba(55, 66, 250, 0.8);
-            color: white;
-        }
+        .btn:active { transform: scale(0.94); }
+        .btn-primary { background: rgba(124,92,252,0.8); color: #fff; }
+        .btn-secondary { background: rgba(255,255,255,0.12); color: #fff; }
 
-        .btn-secondary {
-            background: rgba(87, 96, 111, 0.8);
-            color: white;
-        }
-
-        .btn:active {
-            transform: scale(0.95);
-        }
-
+        /* ── Overlays ── */
         .metrics-overlay {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            background: rgba(0, 0, 0, 0.6);
-            backdrop-filter: blur(10px);
-            border-radius: 10px;
-            padding: 15px;
-            min-width: 150px;
+            top: 16px; right: 16px;
+            background: rgba(0,0,0,0.55);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 12px;
+            padding: 12px 14px;
+            min-width: 130px;
+            border: 1px solid rgba(255,255,255,0.08);
         }
 
         .metric-row {
             display: flex;
             justify-content: space-between;
-            margin-bottom: 5px;
-            font-size: 0.8rem;
+            margin-bottom: 4px;
+            font-size: 0.72rem;
         }
 
-        .metric-label {
-            color: #ccc;
-        }
-
-        .metric-value {
-            font-weight: bold;
-            color: #2ed573;
-        }
+        .metric-label { color: #999; }
+        .metric-value { font-weight: 600; color: #51cf66; }
 
         .detection-overlay {
             position: absolute;
-            top: 20px;
-            left: 20px;
-            background: rgba(0, 0, 0, 0.6);
-            backdrop-filter: blur(10px);
-            border-radius: 10px;
-            padding: 10px;
+            top: 16px; left: 16px;
+            background: rgba(0,0,0,0.55);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 12px;
+            padding: 10px 12px;
             max-width: 200px;
             max-height: 200px;
             overflow-y: auto;
+            border: 1px solid rgba(255,255,255,0.08);
         }
 
         .detection-item {
-            background: rgba(46, 213, 115, 0.2);
+            background: rgba(81,207,102,0.12);
             padding: 5px 8px;
             margin-bottom: 3px;
-            border-radius: 5px;
-            font-size: 0.7rem;
-            border-left: 3px solid #2ed573;
+            border-radius: 6px;
+            font-size: 0.68rem;
+            border-left: 3px solid #51cf66;
         }
 
+        /* ── Model Status ── */
+        #modelStatus {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 12px 20px;
+            border-radius: 10px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            background: rgba(51,154,240,0.3);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(51,154,240,0.4);
+            z-index: 50;
+            display: none;
+        }
+
+        /* ── Permission Screen ── */
         .permission-screen {
             position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(160deg, #1a1033, #0f0f1a, #0a1628);
             display: flex;
             flex-direction: column;
             justify-content: center;
             align-items: center;
             text-align: center;
             padding: 40px;
+            z-index: 100;
         }
 
-        .permission-icon {
-            font-size: 4rem;
-            margin-bottom: 20px;
-        }
+        .permission-icon { font-size: 4rem; margin-bottom: 20px; }
 
         .permission-text {
-            font-size: 1.2rem;
-            margin-bottom: 30px;
-            line-height: 1.5;
+            font-size: 1.1rem;
+            margin-bottom: 24px;
+            line-height: 1.6;
+            color: #ccc;
         }
 
+        .start-btn {
+            padding: 14px 36px;
+            border: none;
+            border-radius: 14px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-weight: 700;
+            font-size: 1rem;
+            background: linear-gradient(135deg, #7c5cfc, #339af0);
+            color: #fff;
+            transition: all 0.3s;
+        }
+
+        .start-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(124,92,252,0.3); }
+        .start-btn:active { transform: translateY(0); }
+
         .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid rgba(255,255,255,0.3);
-            border-top: 4px solid white;
+            width: 36px; height: 36px;
+            border: 3px solid rgba(255,255,255,0.15);
+            border-top: 3px solid #7c5cfc;
             border-radius: 50%;
-            animation: spin 1s linear infinite;
+            animation: spin 0.8s linear infinite;
             margin: 20px auto;
         }
 
@@ -208,78 +214,65 @@
         }
 
         .error-message {
-            background: rgba(255, 71, 87, 0.1);
-            border: 2px solid #ff4757;
+            background: rgba(255,71,87,0.1);
+            border: 1px solid rgba(255,71,87,0.3);
             border-radius: 10px;
-            padding: 15px;
-            margin-top: 20px;
-            text-align: center;
-        }
-
-        .fullscreen-toggle {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            background: rgba(0, 0, 0, 0.6);
-            border: none;
-            color: white;
-            padding: 10px;
-            border-radius: 50%;
-            cursor: pointer;
-            font-size: 1.2rem;
-            z-index: 100;
+            padding: 14px;
+            margin-top: 16px;
+            font-size: 0.88rem;
+            color: #ff6b6b;
         }
     </style>
 </head>
 <body>
     <div class="phone-container">
-        <!-- Permission/Loading Screen -->
+        <!-- Permission Screen -->
         <div class="permission-screen" id="permissionScreen">
             <div class="permission-icon">📹</div>
             <div class="permission-text">
-                Allow camera access to start object detection
+                Allow camera access to start<br>real-time object detection
             </div>
-            <button class="btn btn-primary" id="startButton" onclick="startCamera()">
+            <button class="start-btn" id="startButton" onclick="startCamera()">
                 📱 Start Camera
             </button>
             <div class="spinner" id="loadingSpinner" style="display: none;"></div>
             <div class="error-message" id="errorMessage" style="display: none;"></div>
         </div>
 
-        <!-- Main Camera View -->
+        <!-- Camera View -->
         <div class="video-container" id="videoContainer" style="display: none;">
             <video id="localVideo" autoplay playsinline muted></video>
             <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
-            
-            <!-- Fullscreen Toggle -->
-            <button class="fullscreen-toggle" onclick="toggleFullscreen()">⛶</button>
-            
-            <!-- Live Metrics -->
+
+            <!-- Model Status -->
+            <div id="modelStatus">🧠 Loading AI...</div>
+
+            <!-- Metrics -->
             <div class="metrics-overlay" id="metricsOverlay">
                 <div class="metric-row">
-                    <span class="metric-label">FPS:</span>
-                    <span class="metric-value" id="fpsDisplay">--</span>
+                    <span class="metric-label">FPS</span>
+                    <span class="metric-value" id="fpsDisplay">—</span>
                 </div>
                 <div class="metric-row">
-                    <span class="metric-label">Latency:</span>
-                    <span class="metric-value" id="latencyDisplay">-- ms</span>
+                    <span class="metric-label">Latency</span>
+                    <span class="metric-value" id="latencyDisplay">—</span>
                 </div>
                 <div class="metric-row">
-                    <span class="metric-label">Objects:</span>
-                    <span class="metric-value" id="objectCountDisplay">--</span>
+                    <span class="metric-label">Objects</span>
+                    <span class="metric-value" id="objectCountDisplay">—</span>
                 </div>
             </div>
 
-            <!-- Recent Detections -->
+            <!-- Detections -->
             <div class="detection-overlay" id="detectionOverlay">
-                <div style="font-size: 0.7rem; color: #ccc; margin-bottom: 8px;">Recent:</div>
+                <div style="font-size: 0.65rem; color: #aaa; margin-bottom: 6px; font-weight: 600;">DETECTED</div>
                 <div id="recentDetections">
-                    <div style="color: #999; font-size: 0.7rem;">No objects detected</div>
+                    <div style="color: #666; font-size: 0.68rem;">🔍 Waiting...</div>
                 </div>
             </div>
         </div>
 
-        <!-- Controls Panel -->
+        <!-- Controls -->
         <div class="controls-panel" id="controlsPanel" style="display: none;">
             <div class="status-indicator" id="connectionStatus">
                 <div class="status-dot"></div>
@@ -287,18 +280,20 @@
             </div>
 
             <div class="control-buttons">
-                <button class="btn btn-secondary" id="switchCamera" onclick="switchCamera()">
-                    🔄 Flip
-                </button>
-                <button class="btn btn-primary" id="qualityToggle" onclick="toggleQuality()">
-                    📺 HD
-                </button>
+                <button class="btn btn-secondary" id="switchCamera" onclick="switchCamera()">🔄 Flip</button>
+                <button class="btn btn-primary" id="qualityToggle" onclick="toggleQuality()">📺 HD</button>
             </div>
         </div>
     </div>
 
+    <!-- TensorFlow.js + COCO-SSD from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+    <!-- Socket.IO (served by server) -->
     <script src="/socket.io/socket.io.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/ort.min.js"></script>
+
+    <!-- App -->
     <script src="js/yolo-detector.js"></script>
     <script src="js/phone.js"></script>
 </body>
