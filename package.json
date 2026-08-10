@@ -1,39 +1,22 @@
 {
-  "name": "webrtc-vlm-detection",
-  "version": "1.0.0",
-  "description": "Real-time WebRTC Multi-Object Detection with VLM",
-  "main": "server/index.js",
+  "name": "webrtc-object-detection",
+  "version": "2.0.0",
+  "description": "Real-time WebRTC Multi-Object Detection with TensorFlow.js COCO-SSD",
+  "main": "server/https_server.js",
   "scripts": {
     "start": "node server/https_server.js",
-    "start:http": "node server/index.js",
-    "start:https": "node server/https_server.js",
-    "start:wasm": "cross-env MODE=wasm node server/https_server.js",
-    "start:server": "cross-env MODE=server node server/https_server.js",
-    "dev": "nodemon server/https_server.js",
-    "build": "webpack --mode production",
-    "test": "jest",
-    "bench": "node bench/benchmark.js"
+    "dev": "nodemon server/https_server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "https": "^1.0.0",
-    "jimp": "^0.22.10",
-    "multer": "^1.4.4",
     "qrcode": "^1.5.3",
     "selfsigned": "^3.0.1",
-    "socket.io": "^4.7.2",
-    "ws": "^8.13.0"
+    "socket.io": "^4.7.2"
   },
   "devDependencies": {
-    "@babel/core": "^7.22.9",
-    "@babel/preset-env": "^7.22.9",
-    "babel-loader": "^9.1.3",
     "cross-env": "^7.0.3",
-    "jest": "^29.6.2",
-    "nodemon": "^3.0.1",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4"
+    "nodemon": "^3.0.1"
   },
   "engines": {
     "node": ">=16.0.0"
@@ -43,8 +26,9 @@
     "object-detection",
     "computer-vision",
     "real-time",
-    "vlm"
+    "tensorflow-js",
+    "coco-ssd"
   ],
-  "author": "ADBrand2",
+  "author": "",
   "license": "MIT"
 }
