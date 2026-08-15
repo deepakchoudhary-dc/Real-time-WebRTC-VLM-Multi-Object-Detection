@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-// Safe, zero-dependency environment loader (F-18)
+// Safe, zero-dependency environment loader
 function loadEnv() {
   const envPath = path.join(__dirname, '../.env');
   if (!fs.existsSync(envPath)) return;
@@ -48,7 +48,6 @@ const rawStunUrls = process.env.STUN_URLS
   : ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'];
 
 const rawTurnUrl = validateIceUrl(process.env.TURN_URL, ['turn:', 'turns:']);
-
 const rawPublicUrl = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.trim().replace(/\/+$/, '') : null;
 
 const config = {
@@ -58,7 +57,7 @@ const config = {
   PUBLIC_URL: rawPublicUrl,
   HOST_WHITELIST: process.env.HOST_WHITELIST ? process.env.HOST_WHITELIST.split(',').map((h) => h.trim().toLowerCase()) : null,
 
-  // WebRTC ICE / STUN / TURN (G11)
+  // WebRTC ICE / STUN / TURN
   STUN_URLS: rawStunUrls.length > 0 ? rawStunUrls : ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
   TURN_URL: rawTurnUrl,
   TURN_USERNAME: process.env.TURN_USERNAME || null,
@@ -66,15 +65,22 @@ const config = {
   TURN_SECRET: process.env.TURN_SECRET || null, // Coturn REST API shared secret
   TURN_TTL_SECONDS: parseInt(process.env.TURN_TTL_SECONDS, 10) || 86400, // 24h default
 
-  // Rate Limiting & Caps (G10)
+  // Rate Limiting & Room Creation Caps (H13)
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60 * 1000,
   RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 120,
+  QR_RATE_LIMIT_MAX: parseInt(process.env.QR_RATE_LIMIT_MAX, 10) || 15, // max 15 room creations / min / IP (H13)
   SOCKET_RATE_LIMIT_WINDOW_MS: parseInt(process.env.SOCKET_RATE_LIMIT_WINDOW_MS, 10) || 1000,
-  SOCKET_RATE_LIMIT_MAX_EVENTS: parseInt(process.env.SOCKET_RATE_LIMIT_MAX_EVENTS, 10) || 60, // max 60 socket events/sec
+  SOCKET_RATE_LIMIT_MAX_EVENTS: parseInt(process.env.SOCKET_RATE_LIMIT_MAX_EVENTS, 10) || 60,
+
+  // Room Lifecycle & Token TTL (H13, R10)
   MAX_ROOMS: parseInt(process.env.MAX_ROOMS, 10) || 100,
-  ROOM_TTL_MS: parseInt(process.env.ROOM_TTL_MS, 10) || 30 * 60 * 1000, // 30 minutes
-  ROOM_ABANDONMENT_TTL_MS: parseInt(process.env.ROOM_ABANDONMENT_TTL_MS, 10) || 5 * 60 * 1000, // 5 minutes (N43)
-  ROOM_GC_INTERVAL_MS: parseInt(process.env.ROOM_GC_INTERVAL_MS, 10) || 60 * 1000,
+  ROOM_TTL_MS: parseInt(process.env.ROOM_TTL_MS, 10) || 30 * 60 * 1000, // 30 minutes active room TTL
+  TOKEN_TTL_MS: parseInt(process.env.TOKEN_TTL_MS, 10) || 15 * 60 * 1000, // 15 minutes token authentication TTL (R10)
+  ROOM_ABANDONMENT_TTL_MS: parseInt(process.env.ROOM_ABANDONMENT_TTL_MS, 10) || 5 * 60 * 1000, // 5 minutes abandoned room TTL
+  NEVER_JOINED_ROOM_TTL_MS: parseInt(process.env.NEVER_JOINED_ROOM_TTL_MS, 10) || 60 * 1000, // 60 seconds never-joined sweep (H13)
+  ROOM_GC_INTERVAL_MS: parseInt(process.env.ROOM_GC_INTERVAL_MS, 10) || 30 * 1000, // 30 seconds GC interval
+
+  // Connection & Metric Bounds
   MAX_CONNECTIONS: parseInt(process.env.MAX_CONNECTIONS, 10) || 100,
   MAX_LATENCY_SAMPLES: parseInt(process.env.MAX_LATENCY_SAMPLES, 10) || 1000,
   MAX_PAYLOAD_BYTES: parseInt(process.env.MAX_PAYLOAD_BYTES, 10) || 256 * 1024 // 256KB

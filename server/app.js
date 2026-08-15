@@ -6,24 +6,11 @@ const { securityHeaders } = require('./security');
 const { attachRoutes } = require('./routes');
 const logger = require('./logger');
 
-// Optional compression
-let compression = null;
-try {
-  compression = require('compression');
-} catch {
-  // Compression optional
-}
-
 function createApp() {
   const app = express();
 
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback'); // Secure trust proxy against spoofing (N31)
-
-  // Compression if available
-  if (compression) {
-    app.use(compression());
-  }
 
   // Security Headers (CSP, HSTS, X-Content-Type-Options, etc.)
   app.use(securityHeaders);

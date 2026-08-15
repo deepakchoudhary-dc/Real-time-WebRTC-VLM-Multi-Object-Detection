@@ -23,8 +23,8 @@ test('RoomStore - Room creation and token allocation', () => {
   store.dispose();
 });
 
-test('RoomStore - Constant-Time Token Authentication (N05, R10, R11)', () => {
-  const store = new RoomStore({ maxRooms: 10 });
+test('RoomStore - Constant-Time Token Authentication & Token TTL (N05, R10, R11)', () => {
+  const store = new RoomStore({ maxRooms: 10, tokenTtlMs: 100 });
   const room = store.createRoom();
 
   // 1. Desktop joins without token -> Rejected
@@ -52,12 +52,16 @@ test('RoomStore - Constant-Time Token Authentication (N05, R10, R11)', () => {
   assert.equal(joinPhoneValid.success, true);
   assert.equal(room.phone, 'socket_p1');
 
-  // 6. Attacker attempts to join with wrong token -> Rejected
-  const join3rd = store.joinRoom(room.code, 'desktop', 'socket_attacker', 'wrong_token');
-  assert.equal(join3rd.success, false);
-  assert.match(join3rd.error, /Access denied/i);
-
-  store.dispose();
+  // 6. Token TTL expiry check (R10)
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const expiredJoin = store.joinRoom(room.code, 'desktop', 'socket_d_late', room.desktopToken);
+      assert.equal(expiredJoin.success, false);
+      assert.match(expiredJoin.error, /expired/i);
+      store.dispose();
+      resolve();
+    }, 120);
+  });
 });
 
 test('RoomStore - Idempotent Join (H1)', () => {
@@ -113,6 +117,21 @@ test('RoomStore - Room-switch leaves previous room and notifies peer (R07)', () 
   assert.equal(switchResult.previousLeave.role, 'desktop');
 
   store.dispose();
+});
+
+test('RoomStore - Never-joined room rapid sweep prevents room exhaustion (H13)', () => {
+  const store = new RoomStore({ roomTtlMs: 5000, neverJoinedTtlMs: 40 });
+  const roomUnused = store.createRoom();
+
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      store.sweep();
+      // Unused room with zero joins swept in 40ms (H13)
+      assert.equal(store.getRoom(roomUnused.code), null);
+      store.dispose();
+      resolve();
+    }, 60);
+  });
 });
 
 test('RoomStore - Liveness-based GC preserves active streaming rooms (N08, N43)', () => {

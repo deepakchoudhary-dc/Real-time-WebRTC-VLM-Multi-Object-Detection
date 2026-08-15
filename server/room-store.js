@@ -11,7 +11,9 @@ class RoomStore {
   constructor(options = {}) {
     this.maxRooms = options.maxRooms || config.MAX_ROOMS;
     this.roomTtlMs = options.roomTtlMs || config.ROOM_TTL_MS;
+    this.tokenTtlMs = options.tokenTtlMs || config.TOKEN_TTL_MS; // 15 min token TTL (R10)
     this.abandonmentTtlMs = options.abandonmentTtlMs || config.ROOM_ABANDONMENT_TTL_MS;
+    this.neverJoinedTtlMs = options.neverJoinedTtlMs || config.NEVER_JOINED_ROOM_TTL_MS; // 60s never-joined sweep (H13)
     this.sweepCallback = null;
 
     // roomCode -> RoomObject
@@ -38,7 +40,7 @@ class RoomStore {
   }
 
   /**
-   * Create a new room with separate desktop and phone tokens (N05, G07)
+   * Create a new room with separate desktop and phone tokens (N05, G07, H13)
    */
   createRoom() {
     if (this.rooms.size >= this.maxRooms) {
@@ -70,7 +72,8 @@ class RoomStore {
       phone: null,
       pendingOffer: null,
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      hasEverJoined: false
     };
 
     this.rooms.set(roomCode, room);
@@ -100,9 +103,9 @@ class RoomStore {
   }
 
   /**
-   * Join a room with authoritative same-token reconnect grace and idempotent checks (P19, G08, H1, H4)
+   * Join a room with authoritative same-token reconnect grace and token TTL (P19, R10, H1, H4)
    */
-  joinRoom(roomCode, role, socketId, token, isSocketAliveFn) {
+  joinRoom(roomCode, role, socketId, token) {
     if (!roomCode || typeof roomCode !== 'string') {
       return { success: false, error: 'Invalid room code' };
     }
@@ -127,9 +130,15 @@ class RoomStore {
       return { success: false, error: `Invalid ${role} authentication token. Access denied.` };
     }
 
+    // Enforce Token TTL (R10)
+    const now = Date.now();
+    if (now - room.createdAt > this.tokenTtlMs) {
+      return { success: false, error: 'Authentication token has expired. Please refresh session.' };
+    }
+
     // 1. Idempotent Join Check (H1): If this socket already holds this slot in this room, do nothing
     if (room[role] === socketId) {
-      room.updatedAt = Date.now();
+      room.updatedAt = now;
       return {
         success: true,
         room,
@@ -142,7 +151,6 @@ class RoomStore {
     // 2. Authoritative Same-Token Reconnect & Reclaim (P19, G08, H4)
     const currentOccupant = room[role];
     if (currentOccupant && currentOccupant !== socketId) {
-      // Because the client presents the exact valid secret token, they are the authoritative owner of this slot
       logger.info(`Authoritative reconnect reclaiming slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
       this.socketMap.delete(currentOccupant);
     }
@@ -156,7 +164,8 @@ class RoomStore {
 
     // Assign slot
     room[role] = socketId;
-    room.updatedAt = Date.now();
+    room.hasEverJoined = true;
+    room.updatedAt = now;
     this.socketMap.set(socketId, { roomCode: cleanCode, role });
 
     // Check for buffered offer designated for this role (N10)
@@ -222,7 +231,7 @@ class RoomStore {
   }
 
   /**
-   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08, N43, G07)
+   * Sweep stale/abandoned rooms based on liveness (never killing active streams, H13, N08, N43)
    */
   sweep(onRoomSweep) {
     const callback = onRoomSweep || this.sweepCallback;
@@ -231,9 +240,10 @@ class RoomStore {
 
     for (const [code, room] of this.rooms.entries()) {
       const isExpired = (now - room.updatedAt > this.roomTtlMs);
-      const isAbandoned = (!room.desktop && !room.phone && (now - room.updatedAt > this.abandonmentTtlMs));
+      const isNeverJoined = (!room.hasEverJoined && !room.desktop && !room.phone && (now - room.createdAt > this.neverJoinedTtlMs));
+      const isAbandoned = (room.hasEverJoined && !room.desktop && !room.phone && (now - room.updatedAt > this.abandonmentTtlMs));
 
-      if (isExpired || isAbandoned) {
+      if (isExpired || isNeverJoined || isAbandoned) {
         if (typeof callback === 'function') {
           if (room.desktop) callback(room.desktop, code);
           if (room.phone) callback(room.phone, code);

@@ -2,83 +2,80 @@
 
 const config = require('./config');
 
-// In-memory HTTP rate limiter map: ip -> { windowStart, count }
-const httpRateLimitMap = new Map();
+/**
+ * In-memory sliding window rate limiter for HTTP routes
+ */
+function createHttpRateLimiter(windowMs = config.RATE_LIMIT_WINDOW_MS, maxRequests = config.RATE_LIMIT_MAX_REQUESTS) {
+  const requests = new Map(); // ip -> [timestamps]
 
-function httpRateLimiter(req, res, next) {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  let record = httpRateLimitMap.get(ip);
-
-  if (!record || now - record.windowStart > config.RATE_LIMIT_WINDOW_MS) {
-    record = { windowStart: now, count: 0 };
-    httpRateLimitMap.set(ip, record);
-  }
-
-  record.count++;
-
-  const remaining = Math.max(0, config.RATE_LIMIT_MAX_REQUESTS - record.count);
-  res.setHeader('X-RateLimit-Limit', config.RATE_LIMIT_MAX_REQUESTS);
-  res.setHeader('X-RateLimit-Remaining', remaining);
-
-  if (record.count > config.RATE_LIMIT_MAX_REQUESTS) {
-    const retryAfter = Math.ceil((record.windowStart + config.RATE_LIMIT_WINDOW_MS - now) / 1000);
-    res.setHeader('Retry-After', retryAfter);
-    return res.status(429).json({
-      error: 'Too many requests. Please slow down.',
-      retryAfterSeconds: retryAfter
-    });
-  }
-
-  next();
-}
-
-// Periodic cleanup of stale HTTP rate limit records
-const cleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [ip, record] of httpRateLimitMap) {
-    if (now - record.windowStart > config.RATE_LIMIT_WINDOW_MS * 2) {
-      httpRateLimitMap.delete(ip);
+  // Periodic cleanup of expired IP records
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [ip, timestamps] of requests.entries()) {
+      const valid = timestamps.filter((t) => now - t < windowMs);
+      if (valid.length === 0) {
+        requests.delete(ip);
+      } else {
+        requests.set(ip, valid);
+      }
     }
-  }
-}, 60_000);
+  }, windowMs);
 
-if (cleanupTimer.unref) {
-  cleanupTimer.unref();
+  if (cleanupTimer.unref) cleanupTimer.unref();
+
+  return function rateLimiterMiddleware(req, res, next) {
+    const rawIp = req.ip || req.connection.remoteAddress || '127.0.0.1';
+    const now = Date.now();
+
+    const timestamps = requests.get(rawIp) || [];
+    const recent = timestamps.filter((t) => now - t < windowMs);
+
+    if (recent.length >= maxRequests) {
+      res.setHeader('Retry-After', Math.ceil(windowMs / 1000));
+      return res.status(429).json({
+        error: 'Too many requests. Please try again later.'
+      });
+    }
+
+    recent.push(now);
+    requests.set(rawIp, recent);
+
+    res.setHeader('X-RateLimit-Limit', maxRequests);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - recent.length));
+
+    next();
+  };
 }
+
+const httpRateLimiter = createHttpRateLimiter(config.RATE_LIMIT_WINDOW_MS, config.RATE_LIMIT_MAX_REQUESTS);
+const qrRateLimiter = createHttpRateLimiter(config.RATE_LIMIT_WINDOW_MS, config.QR_RATE_LIMIT_MAX); // Dedicated QR Room Creation Limiter (H13)
 
 /**
- * Per-Socket Token Bucket / Sliding Window Rate Limiter
+ * Per-Socket Sliding Window Rate Limiter
  */
 class SocketRateLimiter {
   constructor(windowMs = config.SOCKET_RATE_LIMIT_WINDOW_MS, maxEvents = config.SOCKET_RATE_LIMIT_MAX_EVENTS) {
     this.windowMs = windowMs;
     this.maxEvents = maxEvents;
-    this.windowStart = Date.now();
-    this.eventCount = 0;
+    this.events = [];
   }
 
-  /**
-   * Check if event is permitted under rate limit
-   * @returns {boolean} true if permitted, false if rate limited
-   */
   allowEvent() {
     const now = Date.now();
-    if (now - this.windowStart > this.windowMs) {
-      this.windowStart = now;
-      this.eventCount = 0;
-    }
+    this.events = this.events.filter((t) => now - t < this.windowMs);
 
-    if (this.eventCount >= this.maxEvents) {
+    if (this.events.length >= this.maxEvents) {
       return false;
     }
 
-    this.eventCount++;
+    this.events.push(now);
     return true;
   }
 }
 
 module.exports = {
+  createHttpRateLimiter,
   httpRateLimiter,
+  qrRateLimiter,
   SocketRateLimiter
 };

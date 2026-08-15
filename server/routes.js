@@ -8,12 +8,12 @@ const logger = require('./logger');
 const { getValidHost, issueCsrfToken, verifyAndConsumeCsrfToken } = require('./security');
 const { roomStore } = require('./room-store');
 const { metricsStore } = require('./metrics');
-const { httpRateLimiter } = require('./rate-limiter');
+const { httpRateLimiter, qrRateLimiter } = require('./rate-limiter');
 const { getPrimaryLANIP } = require('./tls');
 
 function attachRoutes(app) {
-  // ── 1. QR Code & Room Initialization (N05, R15) ───────────────────
-  app.get('/api/qr', httpRateLimiter, async (req, res) => {
+  // ── 1. QR Code & Room Initialization (N05, R15, H13 bounded) ─────
+  app.get('/api/qr', qrRateLimiter, async (req, res) => {
     try {
       const validHost = getValidHost(req);
       const portPart = config.PORT !== 443 ? `:${config.PORT}` : '';
@@ -104,7 +104,7 @@ function attachRoutes(app) {
     metricsStore.reset();
     res.json({
       message: 'Metrics successfully reset.',
-      csrfToken: issueCsrfToken() // Return refreshed CSRF token for subsequent resets (G02)
+      csrfToken: issueCsrfToken()
     });
   });
 
