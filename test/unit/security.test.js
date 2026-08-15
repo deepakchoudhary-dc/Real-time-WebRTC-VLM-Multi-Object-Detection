@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isOriginAllowed, getValidHost, getCsrfToken, verifyCsrfToken, rotateCsrfSecret } = require('../../server/security');
+const { isOriginAllowed, getValidHost, issueCsrfToken, verifyAndConsumeCsrfToken } = require('../../server/security');
 
 test('Security - Origin validation', () => {
   // Local origins
@@ -36,29 +36,29 @@ test('Security - Host header validation', () => {
   assert.equal(getValidHost(reqEvil), null);
 });
 
-test('Security - CSRF Token Verification', () => {
-  const token = getCsrfToken();
+test('Security - Per-Session CSRF Token Issuance and Consumption (N12)', () => {
+  const token = issueCsrfToken();
   assert.ok(token);
+  assert.equal(token.length, 64);
 
+  // Valid token consumption
   const validReq = {
-    headers: { 'x-csrf-token': token },
-    query: {}
+    headers: { 'x-csrf-token': token }
   };
-  assert.equal(verifyCsrfToken(validReq), true);
+  assert.equal(verifyAndConsumeCsrfToken(validReq), true);
 
+  // Re-consuming same token fails (single-use rotation)
+  assert.equal(verifyAndConsumeCsrfToken(validReq), false);
+
+  // Invalid token fails
   const invalidReq = {
-    headers: { 'x-csrf-token': 'wrong-token-value' },
-    query: {}
+    headers: { 'x-csrf-token': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' }
   };
-  assert.equal(verifyCsrfToken(invalidReq), false);
+  assert.equal(verifyAndConsumeCsrfToken(invalidReq), false);
 
+  // Missing header fails
   const missingReq = {
-    headers: {},
-    query: {}
+    headers: {}
   };
-  assert.equal(verifyCsrfToken(missingReq), false);
-
-  // Rotate secret test
-  const newToken = rotateCsrfSecret();
-  assert.notEqual(token, newToken);
+  assert.equal(verifyAndConsumeCsrfToken(missingReq), false);
 });

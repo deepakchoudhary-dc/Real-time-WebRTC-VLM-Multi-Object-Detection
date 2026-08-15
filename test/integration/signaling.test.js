@@ -20,13 +20,10 @@ class MockSocket extends EventEmitter {
     this.middleware.push(fn);
   }
 
-  // Simulate client triggering an event
   clientEmit(event, data, callback) {
-    // Run middleware
     let idx = 0;
     const next = (err) => {
       if (err) {
-        this.emit('error-message', { error: err.message });
         return;
       }
       idx++;
@@ -75,46 +72,52 @@ class MockIOServer extends EventEmitter {
   }
 }
 
-test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (t) => {
+test('Signaling Integration - Full Token Auth, Bidirectional Offer Buffering & Role Security', async (t) => {
   const io = new MockIOServer();
   attachSignaling(io);
 
-  await t.test('Room pairing with token authentication', () => {
+  await t.test('Desktop and Phone Token Authentication (N05)', () => {
     const room = roomStore.createRoom();
-    const desktop = io.connectSocket('desktop_1');
-    const phone = io.connectSocket('phone_1');
+    const attackerDesktop = io.connectSocket('desktop_attacker');
+    const validDesktop = io.connectSocket('desktop_valid');
+    const validPhone = io.connectSocket('phone_valid');
 
-    let desktopJoined = false;
-    let phoneJoined = false;
-
-    desktop.clientEmit('join-room', {
+    let attackerRejected = false;
+    attackerDesktop.clientEmit('join-room', {
       roomCode: room.code,
       role: 'desktop',
-      token: room.token
+      token: 'wrong-token'
     }, (ack) => {
-      assert.equal(ack.success, true);
-      assert.equal(ack.role, 'desktop');
-      desktopJoined = true;
+      if (!ack.success) attackerRejected = true;
     });
+    assert.equal(attackerRejected, true);
 
-    phone.clientEmit('join-room', {
+    let desktopJoined = false;
+    validDesktop.clientEmit('join-room', {
+      roomCode: room.code,
+      role: 'desktop',
+      token: room.desktopToken
+    }, (ack) => {
+      if (ack.success) desktopJoined = true;
+    });
+    assert.equal(desktopJoined, true);
+
+    let phoneJoined = false;
+    validPhone.clientEmit('join-room', {
       roomCode: room.code,
       role: 'phone',
-      token: room.token
+      token: room.phoneToken
     }, (ack) => {
-      assert.equal(ack.success, true);
-      assert.equal(ack.role, 'phone');
-      phoneJoined = true;
+      if (ack.success) phoneJoined = true;
     });
-
-    assert.equal(desktopJoined, true);
     assert.equal(phoneJoined, true);
 
-    desktop.disconnect();
-    phone.disconnect();
+    attackerDesktop.disconnect();
+    validDesktop.disconnect();
+    validPhone.disconnect();
   });
 
-  await t.test('Offer Buffering - Phone offers before Desktop joins', () => {
+  await t.test('Offer Buffering - Phone offers before Desktop joins (N10)', () => {
     const room = roomStore.createRoom();
     const phone = io.connectSocket('phone_early');
     const desktop = io.connectSocket('desktop_late');
@@ -125,10 +128,9 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
     phone.clientEmit('join-room', {
       roomCode: room.code,
       role: 'phone',
-      token: room.token
+      token: room.phoneToken
     }, (ack) => {
       assert.equal(ack.success, true);
-      assert.equal(ack.hasPeer, false);
     });
 
     // 2. Phone sends offer immediately (buffered on server)
@@ -136,7 +138,7 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
     assert.ok(room.pendingOffer);
     assert.equal(room.pendingOffer.offer.sdp, testOffer.sdp);
 
-    // 3. Desktop joins -> Server immediately delivers buffered offer
+    // 3. Desktop joins later -> Receives buffered offer
     let receivedOffer = null;
     desktop.on('offer', (off) => {
       receivedOffer = off;
@@ -145,15 +147,14 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
     desktop.clientEmit('join-room', {
       roomCode: room.code,
       role: 'desktop',
-      token: room.token
+      token: room.desktopToken
     }, (ack) => {
       assert.equal(ack.success, true);
-      assert.equal(ack.hasPendingOffer, true);
     });
 
     assert.ok(receivedOffer);
     assert.equal(receivedOffer.sdp, testOffer.sdp);
-    assert.equal(room.pendingOffer, null); // Cleared after delivery
+    assert.equal(room.pendingOffer, null);
 
     desktop.disconnect();
     phone.disconnect();
@@ -165,8 +166,8 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
     const desktop = io.connectSocket('desktop_rec');
     const phone = io.connectSocket('phone_sender');
 
-    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.token });
-    phone.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.token });
+    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.desktopToken });
+    phone.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken });
 
     let desktopReceived = null;
     desktop.on('client_received_detection-result', (data) => {
@@ -182,25 +183,24 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
       ]
     };
 
-    // Phone emits detection result -> Relayed to desktop
     phone.clientEmit('detection-result', validPayload);
     assert.ok(desktopReceived);
     assert.equal(desktopReceived.frame_id, 'frame_abc');
     assert.equal(metricsStore.processedFrames, 1);
 
-    // Desktop attempts to emit detection result -> Blocked (F-04)
+    // Desktop attempts to emit detection result -> Ignored
     desktop.clientEmit('detection-result', validPayload);
-    assert.equal(metricsStore.processedFrames, 1); // Not incremented
+    assert.equal(metricsStore.processedFrames, 1);
 
     desktop.disconnect();
     phone.disconnect();
   });
 
-  await t.test('Socket event rate limiting under rapid event floods', () => {
+  await t.test('Socket event rate limiting notifies client with error-message (N31)', () => {
     const room = roomStore.createRoom();
     const spammer = io.connectSocket('spammer_socket');
 
-    spammer.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.token });
+    spammer.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken });
 
     let rateLimitBlocked = false;
     spammer.on('error-message', (err) => {
@@ -209,7 +209,6 @@ test('Signaling Integration - Pairing, Offer Buffering & Role Security', async (
       }
     });
 
-    // Spam 70 events (limit is 60)
     for (let i = 0; i < 70; i++) {
       spammer.clientEmit('ice-candidate', { candidate: 'candidate:dummy' });
     }

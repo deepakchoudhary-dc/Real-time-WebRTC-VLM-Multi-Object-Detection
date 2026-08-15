@@ -68,3 +68,5 @@ ngrok.log
 models/*.onnx
 models/*.pb
 models/*.tflite
+
+plan.md 

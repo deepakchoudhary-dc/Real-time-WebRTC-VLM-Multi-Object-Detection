@@ -27,8 +27,11 @@ let passed = 0;
 for (const file of testFiles) {
   const relPath = path.relative(path.join(__dirname, '..'), file);
   process.stdout.write(`• ${relPath}: `);
+  
+  // Enforce 10s timeout on each test runner subprocess (N34)
   const res = spawnSync(process.execPath, ['--test', file], {
     encoding: 'utf8',
+    timeout: 10000,
     env: { ...process.env, NODE_ENV: 'test', LOG_LEVEL: 'warn' }
   });
 
@@ -37,8 +40,11 @@ for (const file of testFiles) {
     passed++;
   } else {
     console.log('❌ FAIL');
-    console.error(res.stdout);
-    console.error(res.stderr);
+    if (res.error && res.error.code === 'ETIMEDOUT') {
+      console.error('Test timed out after 10000ms.');
+    }
+    if (res.stdout) console.error(res.stdout);
+    if (res.stderr) console.error(res.stderr);
     failed++;
   }
 }

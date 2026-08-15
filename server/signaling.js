@@ -68,7 +68,6 @@ function validateSdp(sdp) {
   if (sdp.type !== 'offer' && sdp.type !== 'answer' && sdp.type !== 'pranswer' && sdp.type !== 'rollback') {
     return null;
   }
-  // Sanity check length
   if (sdp.sdp.length > 200_000) return null;
   return {
     type: sdp.type,
@@ -81,7 +80,6 @@ function validateSdp(sdp) {
  */
 function validateIceCandidate(candidate) {
   if (!candidate || typeof candidate !== 'object') return null;
-  // May be null candidate (end-of-candidates indication in spec)
   if (candidate.candidate === null || candidate.candidate === '') {
     return { candidate: null };
   }
@@ -102,16 +100,17 @@ function attachSignaling(io) {
     const rateLimiter = new SocketRateLimiter();
     logger.debug(`Socket connected: ${socket.id}`);
 
-    // Middleware check on every event for socket rate limiting
+    // Middleware check on every event for socket rate limiting (N31)
     socket.use(([event, ...args], next) => {
       if (!rateLimiter.allowEvent()) {
         logger.warn(`Socket rate limit exceeded for ${socket.id}, event: ${event}`);
-        return next(new Error('Rate limit exceeded. Too many socket events.'));
+        socket.emit('error-message', { error: 'Rate limit exceeded. Too many socket events.' });
+        return next(new Error('Rate limit exceeded.'));
       }
       next();
     });
 
-    // ── 1. Room Joining ──────────────────────────────────────────────
+    // ── 1. Room Joining (N05, N09) ───────────────────────────────────
     socket.on('join-room', (payload, callback) => {
       if (!payload || typeof payload !== 'object') {
         const err = { error: 'Invalid join-room payload.' };
@@ -131,15 +130,14 @@ function attachSignaling(io) {
         return;
       }
 
-      const { room, peerSocketId, pendingOffer } = result;
+      const { room, peerSocketId, bufferedOffer } = result;
       logger.info(`Peer joined room: ${logger.maskCode(room.code)} as ${role} (id: ${socket.id})`);
 
       const ackData = {
         success: true,
         roomCode: room.code,
         role,
-        hasPeer: !!peerSocketId,
-        hasPendingOffer: !!pendingOffer
+        hasPeer: !!peerSocketId
       };
 
       if (typeof callback === 'function') callback(ackData);
@@ -148,40 +146,45 @@ function attachSignaling(io) {
       // Notify the other peer if already in the room
       if (peerSocketId) {
         io.to(peerSocketId).emit('peer-joined', { role });
+      }
 
-        // If desktop just joined and phone has a buffered pending offer, deliver it now!
-        if (role === 'desktop' && pendingOffer) {
-          logger.info(`Delivering buffered offer to desktop in room ${logger.maskCode(room.code)}`);
-          socket.emit('offer', pendingOffer.offer);
-          roomStore.clearPendingOffer(room.code);
-        }
+      // Deliver buffered offer if designated for this peer (N10)
+      if (bufferedOffer) {
+        logger.info(`Delivering buffered offer to ${role} in room ${logger.maskCode(room.code)}`);
+        socket.emit('offer', bufferedOffer);
       }
     });
 
-    // ── 2. WebRTC SDP Offer (Phone -> Desktop or vice versa) ──────────
+    // ── 2. WebRTC SDP Offer (Bidirectional Buffering, N10) ────────────
     socket.on('offer', (offerData) => {
       const validSdp = validateSdp(offerData);
       if (!validSdp) return;
 
-      const peerSocketId = roomStore.getPeerSocketId(socket.id);
       const roomInfo = roomStore.getRoomBySocketId(socket.id);
-
       if (!roomInfo) return;
+
+      roomStore.touchRoom(roomInfo.meta.roomCode);
+      const peerSocketId = roomStore.getPeerSocketId(socket.id);
 
       if (peerSocketId) {
         // Point-to-peer relay directly to the peer's socket
         io.to(peerSocketId).emit('offer', validSdp);
-      } else if (roomInfo.meta.role === 'phone') {
-        // Buffer offer on server until desktop joins
-        logger.debug(`Buffering offer from phone for room ${logger.maskCode(roomInfo.meta.roomCode)}`);
-        roomStore.setPendingOffer(roomInfo.meta.roomCode, validSdp, socket.id);
+      } else {
+        // Buffer offer on server until peer joins (N10)
+        logger.debug(`Buffering offer from ${roomInfo.meta.role} for room ${logger.maskCode(roomInfo.meta.roomCode)}`);
+        roomStore.setPendingOffer(roomInfo.meta.roomCode, validSdp, roomInfo.meta.role, socket.id);
       }
     });
 
-    // ── 3. WebRTC SDP Answer (Desktop -> Phone) ──────────────────────
+    // ── 3. WebRTC SDP Answer (Point-to-peer relay) ───────────────────
     socket.on('answer', (answerData) => {
       const validSdp = validateSdp(answerData);
       if (!validSdp) return;
+
+      const roomInfo = roomStore.getRoomBySocketId(socket.id);
+      if (roomInfo) {
+        roomStore.touchRoom(roomInfo.meta.roomCode);
+      }
 
       const peerSocketId = roomStore.getPeerSocketId(socket.id);
       if (peerSocketId) {
@@ -194,13 +197,18 @@ function attachSignaling(io) {
       const validCandidate = validateIceCandidate(candidateData);
       if (!validCandidate) return;
 
+      const roomInfo = roomStore.getRoomBySocketId(socket.id);
+      if (roomInfo) {
+        roomStore.touchRoom(roomInfo.meta.roomCode);
+      }
+
       const peerSocketId = roomStore.getPeerSocketId(socket.id);
       if (peerSocketId) {
         io.to(peerSocketId).emit('ice-candidate', validCandidate);
       }
     });
 
-    // ── 5. Detection Result Relay (Phone -> Desktop) ─────────────────
+    // ── 5. Detection Result Relay (Phone -> Desktop, N15) ─────────────
     socket.on('detection-result', (resultData) => {
       const roomInfo = roomStore.getRoomBySocketId(socket.id);
       if (!roomInfo || roomInfo.meta.role !== 'phone') {
@@ -210,14 +218,13 @@ function attachSignaling(io) {
       const validResult = validateDetectionResult(resultData);
       if (!validResult) return;
 
-      metricsStore.incrementProcessedFrames();
-      metricsStore.incrementTotalFrames();
-
-      const latency = Date.now() - validResult.capture_ts;
-      metricsStore.recordLatency(latency);
+      roomStore.touchRoom(roomInfo.meta.roomCode);
 
       const peerSocketId = roomStore.getPeerSocketId(socket.id);
       if (peerSocketId) {
+        // Count frame ONLY if successfully relayed to peer (N15)
+        metricsStore.incrementProcessedFrames();
+        metricsStore.incrementTotalFrames();
         io.to(peerSocketId).emit('detection-result', validResult);
       }
     });

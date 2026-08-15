@@ -18,7 +18,7 @@ function createApp() {
   const app = express();
 
   app.disable('x-powered-by');
-  app.set('trust proxy', 1);
+  app.set('trust proxy', 'loopback'); // Secure trust proxy against spoofing (N31)
 
   // Compression if available
   if (compression) {
@@ -48,10 +48,13 @@ function createApp() {
     res.status(404).json({ error: 'Not found' });
   });
 
-  // Global Error Handler
+  // Global Error Handler (N33: handles malformed JSON with 400)
   app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+      return res.status(400).json({ error: 'Malformed JSON payload' });
+    }
     logger.error(`Unhandled request error: ${err.message}`, { stack: err.stack });
-    res.status(500).json({ error: 'Internal Server Error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
   });
 
   return app;

@@ -58,7 +58,7 @@ function getValidHost(req) {
 }
 
 /**
- * Security headers middleware
+ * Security headers middleware (N22 strict CSP)
  */
 function securityHeaders(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -70,7 +70,7 @@ function securityHeaders(req, res, next) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
 
-  // Content Security Policy
+  // Strict Content Security Policy
   res.setHeader(
     'Content-Security-Policy',
     [
@@ -91,34 +91,55 @@ function securityHeaders(req, res, next) {
 }
 
 /**
- * In-memory CSRF secret for administrative actions (e.g. /api/reset-metrics)
+ * Per-session CSRF token manager with TTL & Single-use Rotation (N12)
  */
-let csrfSecret = crypto.randomBytes(32).toString('hex');
+const csrfTokenStore = new Map(); // token -> timestamp
+const CSRF_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-function getCsrfToken() {
-  return csrfSecret;
+function issueCsrfToken() {
+  const token = crypto.randomBytes(32).toString('hex');
+  csrfTokenStore.set(token, Date.now());
+  return token;
 }
 
-function rotateCsrfSecret() {
-  csrfSecret = crypto.randomBytes(32).toString('hex');
-  return csrfSecret;
-}
-
-function verifyCsrfToken(req) {
-  const token = req.headers['x-csrf-token'] || req.query.csrfToken;
-  if (!token || typeof token !== 'string') return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(csrfSecret));
-  } catch {
+function verifyAndConsumeCsrfToken(req) {
+  const token = req.headers['x-csrf-token'];
+  if (!token || typeof token !== 'string' || token.length !== 64) {
     return false;
   }
+
+  const issuedAt = csrfTokenStore.get(token);
+  if (!issuedAt) return false;
+
+  const now = Date.now();
+  if (now - issuedAt > CSRF_TTL_MS) {
+    csrfTokenStore.delete(token);
+    return false;
+  }
+
+  // Consume token on use (single-use rotation)
+  csrfTokenStore.delete(token);
+  return true;
+}
+
+// Periodic cleanup of expired CSRF tokens
+const csrfCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [token, ts] of csrfTokenStore) {
+    if (now - ts > CSRF_TTL_MS) {
+      csrfTokenStore.delete(token);
+    }
+  }
+}, 300_000);
+
+if (csrfCleanupTimer.unref) {
+  csrfCleanupTimer.unref();
 }
 
 module.exports = {
   isOriginAllowed,
   getValidHost,
   securityHeaders,
-  getCsrfToken,
-  rotateCsrfSecret,
-  verifyCsrfToken
+  issueCsrfToken,
+  verifyAndConsumeCsrfToken
 };

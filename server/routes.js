@@ -5,14 +5,14 @@ const crypto = require('crypto');
 const QRCode = require('qrcode');
 const config = require('./config');
 const logger = require('./logger');
-const { getValidHost, getCsrfToken, verifyCsrfToken } = require('./security');
+const { getValidHost, issueCsrfToken, verifyAndConsumeCsrfToken } = require('./security');
 const { roomStore } = require('./room-store');
 const { metricsStore } = require('./metrics');
 const { httpRateLimiter } = require('./rate-limiter');
 const { getPrimaryLANIP } = require('./tls');
 
 function attachRoutes(app) {
-  // ── 1. QR Code & Room Initialization ──────────────────────────────
+  // ── 1. QR Code & Room Initialization (N05) ────────────────────────
   app.get('/api/qr', httpRateLimiter, async (req, res) => {
     try {
       const validHost = getValidHost(req);
@@ -29,7 +29,7 @@ function attachRoutes(app) {
       }
 
       const room = roomStore.createRoom();
-      const phoneUrl = `${baseUrl}/phone?room=${encodeURIComponent(room.code)}&token=${encodeURIComponent(room.token)}`;
+      const phoneUrl = `${baseUrl}/phone?room=${encodeURIComponent(room.code)}&token=${encodeURIComponent(room.phoneToken)}`;
 
       const qrCode = await QRCode.toDataURL(phoneUrl, {
         width: 256,
@@ -42,8 +42,9 @@ function attachRoutes(app) {
         qr: qrCode,
         url: phoneUrl,
         roomCode: room.code,
-        token: room.token,
-        csrfToken: getCsrfToken()
+        desktopToken: room.desktopToken,
+        token: room.phoneToken,
+        csrfToken: issueCsrfToken()
       });
     } catch (error) {
       logger.error(`Failed to generate QR code: ${error.message}`);
@@ -96,10 +97,10 @@ function attachRoutes(app) {
     res.json(snapshot);
   });
 
-  // ── 4. Reset Metrics (Protected with CSRF header) ─────────────────
+  // ── 4. Reset Metrics (Protected with per-session CSRF token, N12) ──
   app.post('/api/reset-metrics', httpRateLimiter, (req, res) => {
-    if (!verifyCsrfToken(req)) {
-      return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+    if (!verifyAndConsumeCsrfToken(req)) {
+      return res.status(403).json({ error: 'Invalid or expired CSRF token.' });
     }
     metricsStore.reset();
     res.json({ message: 'Metrics successfully reset.' });

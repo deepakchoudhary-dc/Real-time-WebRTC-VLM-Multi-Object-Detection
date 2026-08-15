@@ -211,11 +211,10 @@
       right: 0;
       padding: 24px 20px calc(24px + env(safe-area-inset-bottom, 0px));
       background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0.3), transparent);
-      display: flex;
+      display: none;
       justify-content: center;
       gap: 16px;
       z-index: 20;
-      display: none;
     }
 
     .control-btn {
@@ -244,19 +243,24 @@
       background: var(--accent-purple);
       border-color: var(--accent-purple);
     }
+
+    @media (prefers-reduced-motion: reduce) {
+      .perm-icon { animation: none; }
+      .start-btn, .control-btn { transition: none; }
+    }
   </style>
 </head>
 <body>
   <div class="app-viewport">
     <!-- Camera Permission Screen -->
     <div class="permission-overlay" id="permOverlay">
-      <div class="perm-icon">📹</div>
+      <div class="perm-icon" aria-hidden="true">📹</div>
       <h1 class="perm-title">Wireless Camera</h1>
       <p class="perm-desc">
         Stream your mobile camera in real-time to the desktop AI object detector over secure P2P WebRTC.
       </p>
       <button class="start-btn" id="startBtn">📱 Start Camera</button>
-      <div class="error-card" id="errorCard"></div>
+      <div class="error-card" id="errorCard" role="alert" aria-live="assertive"></div>
     </div>
 
     <!-- Active Camera Viewport -->
@@ -266,12 +270,12 @@
 
       <!-- Top HUD -->
       <div class="top-hud">
-        <div class="hud-pill" id="statusPill">
+        <div class="hud-pill" id="statusPillContainer" role="status" aria-live="polite">
           <div class="dot" id="statusDot"></div>
           <span id="statusText">Connecting...</span>
         </div>
 
-        <div class="metrics-pill">
+        <div class="metrics-pill" aria-label="Streaming Performance Metrics">
           <div class="metrics-item">
             <span class="metrics-label">FPS:</span>
             <span class="metrics-val" id="fpsDisplay">—</span>
@@ -289,8 +293,8 @@
 
       <!-- Bottom Controls -->
       <div class="controls-panel" id="controlsPanel">
-        <button class="control-btn" id="flipBtn">🔄 Flip</button>
-        <button class="control-btn" id="qualityBtn">📺 HD</button>
+        <button class="control-btn" id="flipBtn" aria-label="Flip Camera front or back">🔄 Flip</button>
+        <button class="control-btn" id="qualityBtn" aria-label="Toggle HD or SD Resolution" aria-pressed="false">📺 HD</button>
       </div>
     </div>
   </div>

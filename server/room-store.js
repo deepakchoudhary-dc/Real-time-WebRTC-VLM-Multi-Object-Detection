@@ -36,7 +36,7 @@ class RoomStore {
   }
 
   /**
-   * Create or register a new room
+   * Create a new room with separate desktop and phone tokens (N05)
    */
   createRoom() {
     if (this.rooms.size >= this.maxRooms) {
@@ -53,13 +53,20 @@ class RoomStore {
       attempts++;
     } while (this.rooms.has(roomCode) && attempts < 20);
 
-    const token = this.generateToken();
+    if (this.rooms.has(roomCode)) {
+      throw new Error('Failed to allocate unique room code after multiple attempts.');
+    }
+
+    const desktopToken = this.generateToken();
+    const phoneToken = this.generateToken();
+
     const room = {
       code: roomCode,
-      token,
+      desktopToken,
+      phoneToken,
       desktop: null,
       phone: null,
-      pendingOffer: null, // Buffered offer from phone if desktop hasn't joined yet
+      pendingOffer: null, // Buffered offer from peer if designated recipient not connected
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -83,52 +90,52 @@ class RoomStore {
     };
   }
 
+  touchRoom(roomCode) {
+    const room = this.getRoom(roomCode);
+    if (room) {
+      room.updatedAt = Date.now();
+    }
+  }
+
   /**
-   * Attempt to join a room
+   * Join a room with full token authentication for BOTH desktop and phone (N05, N06, N09)
    */
   joinRoom(roomCode, role, socketId, token) {
     if (!roomCode || typeof roomCode !== 'string') {
       return { success: false, error: 'Invalid room code' };
     }
     const cleanCode = roomCode.trim().toUpperCase();
-    let room = this.rooms.get(cleanCode);
-
-    if (role !== 'desktop' && role !== 'phone') {
-      return { success: false, error: 'Invalid role. Must be desktop or phone.' };
-    }
-
-    // If desktop tries to join a non-existent room with a valid token, allow initializing it
-    if (!room && role === 'desktop') {
-      room = {
-        code: cleanCode,
-        token: token || this.generateToken(),
-        desktop: null,
-        phone: null,
-        pendingOffer: null,
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      };
-      this.rooms.set(cleanCode, room);
-    }
+    const room = this.rooms.get(cleanCode);
 
     if (!room) {
       return { success: false, error: 'Room does not exist' };
     }
 
-    // Phone MUST provide valid token matching room.token
-    if (role === 'phone') {
-      if (!token || typeof token !== 'string') {
-        return { success: false, error: 'Room token required for camera authentication' };
-      }
-      if (token !== room.token) {
-        return { success: false, error: 'Invalid room token. Access denied.' };
-      }
+    if (role !== 'desktop' && role !== 'phone') {
+      return { success: false, error: 'Invalid role. Must be desktop or phone.' };
     }
 
-    // Check if slot is already actively occupied by a DIFFERENT socket
+    if (!token || typeof token !== 'string') {
+      return { success: false, error: `${role} authentication token required.` };
+    }
+
+    // Authenticate token for role (N05)
+    const expectedToken = role === 'desktop' ? room.desktopToken : room.phoneToken;
+    if (token !== expectedToken) {
+      return { success: false, error: `Invalid ${role} authentication token. Access denied.` };
+    }
+
+    // Reconnection / Slot Reclaim support (N09)
     const currentOccupant = room[role];
     if (currentOccupant && currentOccupant !== socketId) {
-      return { success: false, error: `Role slot '${role}' is already occupied.` };
+      // Check if previous occupant socket is still valid
+      const existingMeta = this.socketMap.get(currentOccupant);
+      if (existingMeta) {
+        // Slot is currently in active use by another live socket
+        return { success: false, error: `Role slot '${role}' is already occupied.` };
+      }
+      // Stale slot reclaimed
+      logger.info(`Reclaiming stale slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
     }
 
     // Leave any previously joined room
@@ -139,21 +146,33 @@ class RoomStore {
     room.updatedAt = Date.now();
     this.socketMap.set(socketId, { roomCode: cleanCode, role });
 
+    // Check for buffered offer designated for this role (N10)
+    let bufferedOffer = null;
+    if (room.pendingOffer && room.pendingOffer.fromRole !== role) {
+      bufferedOffer = room.pendingOffer.offer;
+      room.pendingOffer = null; // Consume buffered offer
+    }
+
     return {
       success: true,
       room,
       peerSocketId: role === 'desktop' ? room.phone : room.desktop,
-      pendingOffer: role === 'desktop' ? room.pendingOffer : null
+      bufferedOffer
     };
   }
 
   /**
-   * Store pending offer if peer is not yet connected
+   * Buffer an offer from any role (N10)
    */
-  setPendingOffer(roomCode, offer, fromSocketId) {
+  setPendingOffer(roomCode, offer, fromRole, fromSocketId) {
     const room = this.getRoom(roomCode);
     if (!room) return false;
-    room.pendingOffer = { offer, from: fromSocketId, timestamp: Date.now() };
+    room.pendingOffer = {
+      offer,
+      fromRole,
+      fromSocketId,
+      timestamp: Date.now()
+    };
     room.updatedAt = Date.now();
     return true;
   }
@@ -164,9 +183,6 @@ class RoomStore {
     room.pendingOffer = null;
   }
 
-  /**
-   * Get the peer socket ID for a given socket in its room
-   */
   getPeerSocketId(socketId) {
     const record = this.socketMap.get(socketId);
     if (!record) return null;
@@ -176,9 +192,6 @@ class RoomStore {
     return record.role === 'desktop' ? room.phone : room.desktop;
   }
 
-  /**
-   * Socket disconnect or leave
-   */
   leaveRoom(socketId) {
     const record = this.socketMap.get(socketId);
     if (!record) return null;
@@ -193,7 +206,6 @@ class RoomStore {
       }
       room.updatedAt = Date.now();
 
-      // If both left and empty for a while, it will be swept
       const otherPeerId = role === 'desktop' ? room.phone : room.desktop;
       return { roomCode, role, otherPeerId, roomEmpty: !room.desktop && !room.phone };
     }
@@ -202,18 +214,24 @@ class RoomStore {
   }
 
   /**
-   * Garbage collect expired and abandoned rooms
+   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08)
+   * @param {function} onRoomSweep - Callback to notify & disconnect active sockets if room expired
    */
-  sweep() {
+  sweep(onRoomSweep) {
     const now = Date.now();
     let swept = 0;
 
     for (const [code, room] of this.rooms.entries()) {
-      const isExpired = now - room.createdAt > this.roomTtlMs;
-      const isAbandoned = !room.desktop && !room.phone && (now - room.updatedAt > 5 * 60 * 1000);
+      // Room is expired if inactive for roomTtlMs (liveness-based, N08)
+      const isExpired = (now - room.updatedAt > this.roomTtlMs);
+      const isAbandoned = (!room.desktop && !room.phone && (now - room.updatedAt > 5 * 60 * 1000));
 
       if (isExpired || isAbandoned) {
-        // Disconnect any lingering socket map references
+        if (typeof onRoomSweep === 'function') {
+          if (room.desktop) onRoomSweep(room.desktop, code);
+          if (room.phone) onRoomSweep(room.phone, code);
+        }
+
         if (room.desktop) this.socketMap.delete(room.desktop);
         if (room.phone) this.socketMap.delete(room.phone);
         this.rooms.delete(code);

@@ -6,37 +6,63 @@ The system establishes a direct peer-to-peer WebRTC video channel between a mobi
 
 ---
 
-## 1. WebRTC Signaling State Machine
+## 1. Dual-Token Room Security Model (N05)
 
-We implement the canonical **MDN Perfect Negotiation** pattern combined with **Server-Side Offer Buffering** to guarantee deterministic connection setup regardless of join order.
+Every session is protected by cryptographic tokens issued at creation time (`/api/qr`):
+- **`desktopToken`**: 128-bit secret held by the desktop dashboard.
+- **`phoneToken`**: 128-bit secret embedded in the pairing QR code URL.
+
+Both roles are authenticated on connection; third parties cannot join or hijack an active video stream.
+
+```
+ Desktop Hub                           Signaling Server                       Mobile Camera
+     │                                        │                                     │
+     │ 1. GET /api/qr                         │                                     │
+     │ ─────────────────────────────────────> │                                     │
+     │ 2. { qr, roomCode, desktopToken, token}│                                     │
+     │ <───────────────────────────────────── │                                     │
+     │                                        │                                     │
+     │ 3. emit('join-room', {role:'desktop',  │                                     │
+     │                       token: dt})      │                                     │
+     │ ─────────────────────────────────────> │                                     │
+     │                                        │ 4. Scan QR: /phone?room=X&token=pt  │
+     │                                        │ <────────────────────────────────── │
+     │                                        │ 5. emit('join-room', {role:'phone', │
+     │                                        │                       token: pt})   │
+     │                                        │ <────────────────────────────────── │
+     │                                        │                                     │
+     │ 6. peer-joined                         │ 7. peer-joined                      │
+     │ <───────────────────────────────────── │ ──────────────────────────────────> │
+```
+
+---
+
+## 2. Bidirectional Offer Buffering & Glare Resolution (N10, F1, F2)
+
+To eliminate race conditions caused by unpredictable join orders:
+- If a peer emits an SDP `offer` before the recipient has joined, the server buffers the offer in memory.
+- As soon as the recipient joins and authenticates, the server immediately flushes and delivers the buffered offer.
+- MDN Perfect Negotiation handles offer collisions automatically (polite desktop vs impolite phone).
+- The client `IceCandidateQueue` holds candidates arriving prior to `setRemoteDescription()` execution.
 
 ```
  Mobile Phone (Impolite)              Signaling Server               Desktop Hub (Polite)
        │                                     │                                │
-       │ 1. GET /phone?room=XYZ&token=ABC    │                                │
-       │ ──────────────────────────────────> │                                │
-       │ 2. emit('join-room', {role, token}) │                                │
-       │ ──────────────────────────────────> │ (Validates token, assigns slot)│
-       │                                     │                                │
-       │ 3. getUserMedia() -> addTrack()     │                                │
-       │ 4. emit('offer', sdp)               │                                │
+       │ 1. emit('offer', sdp)               │                                │
        │ ──────────────────────────────────> │ (Desktop not joined yet:       │
        │                                     │  Buffers pending offer)        │
        │                                     │                                │
-       │                                     │  5. GET / -> /api/qr           │
+       │                                     │  2. emit('join-room', desktop) │
        │                                     │ <───────────────────────────── │
-       │                                     │  6. emit('join-room', 'desktop')│
-       │                                     │ <───────────────────────────── │
-       │                                     │ 7. emit('offer', bufferedSdp)  │
+       │                                     │ 3. emit('offer', bufferedSdp)  │
        │                                     │ ─────────────────────────────> │
        │                                     │                                │
-       │                                     │ 8. setRemoteDescription(offer) │
-       │                                     │ 9. createAnswer()              │
-       │                                     │ 10. emit('answer', sdp)        │
+       │                                     │ 4. setRemoteDescription(offer) │
+       │                                     │ 5. createAnswer()              │
+       │                                     │ 6. emit('answer', sdp)         │
        │                                     │ <───────────────────────────── │
-       │ 11. emit('answer', sdp)             │                                │
+       │ 7. emit('answer', sdp)              │                                │
        │ <────────────────────────────────── │                                │
-       │ 12. setRemoteDescription(answer)    │                                │
        │                                     │                                │
        │ ◄══════════════════════════════════════════════════════════════════► │
        │                Direct P2P WebRTC Video Media Stream                  │
@@ -44,26 +70,17 @@ We implement the canonical **MDN Perfect Negotiation** pattern combined with **S
 
 ---
 
-## 2. ICE Candidate Buffering (`IceCandidateQueue`)
+## 3. Liveness-Based Session Lifecycle & GC (N08, N09)
 
-When ICE candidates arrive before `setRemoteDescription()` completes, they are buffered in the client-side `IceCandidateQueue`. As soon as the remote session description is set, the queue flushes all pending candidates via `pc.addIceCandidate()`.
-
----
-
-## 3. Letterbox & Coordinate Mapping (`objectFitRect`)
-
-Mobile cameras produce portrait aspect ratios (e.g. 9:16 or 3:4), whereas desktop containers are typically 16:9. The `objectFitRect` function calculates the exact render boundaries:
-
-$$\text{Render Rect} = \text{compute}(\text{containerWidth}, \text{containerHeight}, \text{videoWidth}, \text{videoHeight}, \text{mode})$$
-
-Bounding boxes are translated from normalized space $[0..1]$ to:
-$$X = \text{rect.x} + x_{\text{norm}} \times \text{rect.width}$$
-$$Y = \text{rect.y} + y_{\text{norm}} \times \text{rect.height}$$
-
-This ensures overlays align with objects without scaling distortion.
+- **Liveness Tracking:** Every signaling message, ICE candidate, and detection frame touches `room.updatedAt = Date.now()`.
+- **GC Protection:** Garbage collection evaluates inactivity rather than creation time, guaranteeing active streams are never dropped.
+- **Reconnect Slot Reclaim:** Reconnecting clients present their session token to immediately reclaim disconnected slots without collision locks.
+- **Desktop Persistence:** Desktop stores `{ roomCode, desktopToken, csrfToken }` in `sessionStorage`, preserving the pairing session across page refreshes.
 
 ---
 
-## 4. Single-Sided Detection Pipeline
+## 4. Letterbox Compensation & Single-Sided Pipeline (N15, N16, N23)
 
-To avoid double-inference and CPU waste, detections are processed on-device (Mobile) and rendered locally, while detection results are relayed over Socket.IO to the desktop for remote visualization and metric computation.
+- **`objectFitRect` Math:** Dynamically calculates video aspect ratio offsets for portrait/landscape video within responsive containers.
+- **Single-Sided Detection:** Inference runs exclusively on the mobile GPU; bounding boxes are relayed to the desktop. If desktop detection mode is selected (`?detect=desktop`), the phone pauses its local loop to avoid redundant computation.
+- **Canonical Metrics:** End-to-end latency is measured at the receiving end (`Date.now() - result.capture_ts`), eliminating cross-clock skew from server logs.

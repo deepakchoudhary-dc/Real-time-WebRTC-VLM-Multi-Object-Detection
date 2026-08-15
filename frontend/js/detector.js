@@ -4,6 +4,8 @@
  * Supports GPU acceleration (WebGL), WASM, and CPU backends.
  * Yields normalized [0..1] bounding boxes with confidence scores for 80 COCO classes.
  */
+'use strict';
+
 class ObjectDetector {
   constructor(options = {}) {
     this.model = null;
@@ -12,11 +14,11 @@ class ObjectDetector {
     this.confidenceThreshold = options.confidenceThreshold || 0.45;
     this.maxDetections = options.maxDetections || 20;
     this.backend = 'webgl';
-    this.lastInferenceTime = 0;
+    this.lastInferenceDuration = 0;
   }
 
   /**
-   * Load the COCO-SSD model (supports local self-hosted model or fallback)
+   * Load the COCO-SSD model (supports local self-hosted model or CDN fallback)
    * @param {function} onProgress - Progress reporting callback (0-100)
    * @returns {Promise<boolean>}
    */
@@ -58,19 +60,19 @@ class ObjectDetector {
 
       if (onProgress) onProgress(60);
 
-      // Load model using lite_mobilenet_v2 (~5MB fast model)
+      // Load model using lite_mobilenet_v2
       const loadOptions = {
         base: 'lite_mobilenet_v2'
       };
 
-      // If local self-hosted model is available, configure modelUrl
+      // Probe local self-hosted model
       try {
         const checkLocal = await fetch('/vendor/models/ssdlite_mobilenet_v2/model.json', { method: 'HEAD' });
         if (checkLocal.ok) {
           loadOptions.modelUrl = '/vendor/models/ssdlite_mobilenet_v2/model.json';
         }
       } catch {
-        // Fallback to default
+        // Fallback to default CDN
       }
 
       this.model = await cocoSsd.load(loadOptions);
@@ -79,10 +81,9 @@ class ObjectDetector {
 
       this.modelLoaded = true;
       this.isLoading = false;
-      console.log(`✅ COCO-SSD detector ready. Backend: ${this.backend}`);
       return true;
     } catch (error) {
-      console.error('❌ Failed to load COCO-SSD detector:', error);
+      console.error('Failed to load COCO-SSD detector:', error);
       this.isLoading = false;
       return false;
     }
@@ -111,7 +112,7 @@ class ObjectDetector {
         this.maxDetections,
         this.confidenceThreshold
       );
-      this.lastInferenceTime = performance.now() - startTime;
+      this.lastInferenceDuration = performance.now() - startTime;
 
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
@@ -132,6 +133,10 @@ class ObjectDetector {
       console.error('Detection inference error:', error);
       return [];
     }
+  }
+
+  get inferenceDuration() {
+    return Math.round(this.lastInferenceDuration);
   }
 
   dispose() {

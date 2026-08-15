@@ -17,10 +17,16 @@ function httpRateLimiter(req, res, next) {
 
   record.count++;
 
+  const remaining = Math.max(0, config.RATE_LIMIT_MAX_REQUESTS - record.count);
+  res.setHeader('X-RateLimit-Limit', config.RATE_LIMIT_MAX_REQUESTS);
+  res.setHeader('X-RateLimit-Remaining', remaining);
+
   if (record.count > config.RATE_LIMIT_MAX_REQUESTS) {
+    const retryAfter = Math.ceil((record.windowStart + config.RATE_LIMIT_WINDOW_MS - now) / 1000);
+    res.setHeader('Retry-After', retryAfter);
     return res.status(429).json({
       error: 'Too many requests. Please slow down.',
-      retryAfterSeconds: Math.ceil((record.windowStart + config.RATE_LIMIT_WINDOW_MS - now) / 1000)
+      retryAfterSeconds: retryAfter
     });
   }
 

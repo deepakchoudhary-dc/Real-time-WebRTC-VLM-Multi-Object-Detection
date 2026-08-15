@@ -19,15 +19,11 @@ function createHttpRedirectServer() {
     const validHost = getValidHost(req);
     const hostHeader = validHost || 'localhost';
     
-    // Replace HTTP_PORT with HTTPS PORT in host header if explicitly present
-    let targetHost = hostHeader;
-    if (targetHost.includes(`:${config.HTTP_PORT}`)) {
-      targetHost = targetHost.replace(`:${config.HTTP_PORT}`, config.PORT === 443 ? '' : `:${config.PORT}`);
-    } else if (!targetHost.includes(':') && config.PORT !== 443) {
-      targetHost = `${targetHost}:${config.PORT}`;
-    }
+    // Clean hostname extraction without substring replace bugs (N11, F-16)
+    const hostname = hostHeader.split(':')[0];
+    const portPart = config.PORT === 443 ? '' : `:${config.PORT}`;
 
-    const redirectUrl = `https://${targetHost}${req.url}`;
+    const redirectUrl = `https://${hostname}${portPart}${req.url}`;
     res.redirect(301, redirectUrl);
   });
 

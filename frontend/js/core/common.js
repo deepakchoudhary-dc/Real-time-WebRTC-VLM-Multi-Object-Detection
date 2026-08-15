@@ -1,10 +1,11 @@
 /**
  * Shared Core Utilities for WebRTC Object Detection (Desktop & Phone)
  */
+'use strict';
 
 /**
- * Calculates the bounding rectangle of a video rendered inside a container with object-fit (contain or cover).
- * This ensures bounding boxes perfectly map to the video pixels even when letterboxed or pillarboxed.
+ * Calculates the bounding rectangle of a video rendered inside a container with object-fit.
+ * Ensures bounding boxes map directly to video pixels regardless of aspect ratio or orientation.
  */
 function objectFitRect(containerWidth, containerHeight, videoWidth, videoHeight, fitMode = 'contain') {
   if (!videoWidth || !videoHeight || !containerWidth || !containerHeight) {
@@ -21,21 +22,17 @@ function objectFitRect(containerWidth, containerHeight, videoWidth, videoHeight,
 
   if (fitMode === 'contain') {
     if (containerRatio > videoRatio) {
-      // Container is wider -> Pillarbox (bars on left/right)
       renderWidth = containerHeight * videoRatio;
       offsetX = (containerWidth - renderWidth) / 2;
     } else {
-      // Container is taller -> Letterbox (bars on top/bottom)
       renderHeight = containerWidth / videoRatio;
       offsetY = (containerHeight - renderHeight) / 2;
     }
   } else if (fitMode === 'cover') {
     if (containerRatio > videoRatio) {
-      // Crop top/bottom
       renderHeight = containerWidth / videoRatio;
       offsetY = (containerHeight - renderHeight) / 2;
     } else {
-      // Crop left/right
       renderWidth = containerHeight * videoRatio;
       offsetX = (containerWidth - renderWidth) / 2;
     }
@@ -50,7 +47,7 @@ function objectFitRect(containerWidth, containerHeight, videoWidth, videoHeight,
 }
 
 /**
- * Buffer ICE candidates that arrive before setRemoteDescription has been called
+ * Buffer ICE candidates that arrive before setRemoteDescription has completed (F2)
  */
 class IceCandidateQueue {
   constructor(peerConnection) {
@@ -92,8 +89,7 @@ class IceCandidateQueue {
 }
 
 /**
- * MDN Perfect Negotiation Coordinator
- * Handles glare, renegotiations, and polite/impolite peer roles
+ * MDN Perfect Negotiation Coordinator with Offer Retry & ICE Restart (N18, N19)
  */
 class PerfectNegotiator {
   constructor(peerConnection, socket, options = {}) {
@@ -105,23 +101,18 @@ class PerfectNegotiator {
     this.isSettingRemoteAnswerPending = false;
     this.candidateQueue = new IceCandidateQueue(this.pc);
 
+    // Offer retry backoff (N18)
+    this.offerRetryTimer = null;
+    this.offerRetryCount = 0;
+    this.maxOfferRetries = 5;
+
     this.setupListeners();
   }
 
   setupListeners() {
     // 1. Negotiation Needed (automatic offer creation)
     this.pc.onnegotiationneeded = async () => {
-      try {
-        this.makingOffer = true;
-        const offer = await this.pc.createOffer();
-        if (this.pc.signalingState !== 'stable') return;
-        await this.pc.setLocalDescription(offer);
-        this.socket.emit('offer', this.pc.localDescription);
-      } catch (err) {
-        console.error('Error in onnegotiationneeded:', err);
-      } finally {
-        this.makingOffer = false;
-      }
+      await this.sendOffer();
     };
 
     // 2. ICE Candidate generation
@@ -131,7 +122,24 @@ class PerfectNegotiator {
       }
     };
 
-    // 3. Incoming Offer from peer
+    // 3. Connection State Change & ICE Restart Recovery (N19)
+    this.pc.onconnectionstatechange = async () => {
+      const state = this.pc.connectionState;
+      if (state === 'failed') {
+        console.warn('WebRTC connection failed. Initiating ICE restart...');
+        try {
+          if (this.pc.restartIce) {
+            this.pc.restartIce();
+          } else {
+            await this.sendOffer({ iceRestart: true });
+          }
+        } catch (err) {
+          console.error('Failed to restart ICE:', err);
+        }
+      }
+    };
+
+    // 4. Incoming Offer from peer
     this.socket.on('offer', async (description) => {
       try {
         const readyForOffer =
@@ -162,9 +170,10 @@ class PerfectNegotiator {
       }
     });
 
-    // 4. Incoming Answer from peer
+    // 5. Incoming Answer from peer
     this.socket.on('answer', async (description) => {
       try {
+        this.clearOfferRetry();
         this.isSettingRemoteAnswerPending = true;
         await this.pc.setRemoteDescription(new RTCSessionDescription(description));
         this.isSettingRemoteAnswerPending = false;
@@ -175,13 +184,54 @@ class PerfectNegotiator {
       }
     });
 
-    // 5. Incoming ICE candidate from peer
+    // 6. Incoming ICE candidate from peer
     this.socket.on('ice-candidate', async (candidateInit) => {
       await this.candidateQueue.addCandidate(candidateInit);
     });
   }
 
+  async sendOffer(options = {}) {
+    try {
+      this.makingOffer = true;
+      const offer = await this.pc.createOffer(options);
+      if (this.pc.signalingState !== 'stable') return;
+      await this.pc.setLocalDescription(offer);
+      this.socket.emit('offer', this.pc.localDescription);
+
+      // Start offer retry timer with backoff (N18)
+      this.scheduleOfferRetry();
+    } catch (err) {
+      console.error('Error creating offer:', err);
+    } finally {
+      this.makingOffer = false;
+    }
+  }
+
+  scheduleOfferRetry() {
+    this.clearOfferRetry();
+    if (this.offerRetryCount >= this.maxOfferRetries) return;
+
+    const delayMs = Math.min(10000, 2000 * Math.pow(1.5, this.offerRetryCount));
+    this.offerRetryTimer = setTimeout(async () => {
+      if (this.pc.signalingState === 'have-local-offer') {
+        console.log(`Retrying unacknowledged offer (attempt ${this.offerRetryCount + 1})...`);
+        this.offerRetryCount++;
+        this.socket.emit('offer', this.pc.localDescription);
+        this.scheduleOfferRetry();
+      }
+    }, delayMs);
+  }
+
+  clearOfferRetry() {
+    if (this.offerRetryTimer) {
+      clearTimeout(this.offerRetryTimer);
+      this.offerRetryTimer = null;
+    }
+    this.offerRetryCount = 0;
+  }
+
   dispose() {
+    this.clearOfferRetry();
     this.candidateQueue.clear();
   }
 }
@@ -212,11 +262,12 @@ async function fetchIceConfig() {
 /**
  * Show a floating UI toast notification
  */
-function showToast(message, type = 'info', durationMs = 3000) {
+function showToast(message, type = 'info', durationMs = 3500) {
   let container = document.getElementById('toastContainer');
   if (!container) {
     container = document.createElement('div');
     container.id = 'toastContainer';
+    container.setAttribute('aria-live', 'polite');
     container.style.cssText = `
       position: fixed;
       bottom: 20px;
@@ -239,7 +290,7 @@ function showToast(message, type = 'info', durationMs = 3000) {
     font-size: 0.85rem;
     font-weight: 500;
     color: #fff;
-    background: ${type === 'error' ? 'rgba(255, 71, 87, 0.9)' : type === 'success' ? 'rgba(81, 207, 102, 0.9)' : 'rgba(51, 154, 240, 0.9)'};
+    background: ${type === 'error' ? 'rgba(255, 71, 87, 0.95)' : type === 'success' ? 'rgba(81, 207, 102, 0.95)' : 'rgba(51, 154, 240, 0.95)'};
     backdrop-filter: blur(8px);
     box-shadow: 0 4px 16px rgba(0,0,0,0.3);
     transition: opacity 0.3s ease, transform 0.3s ease;
@@ -261,7 +312,7 @@ function showToast(message, type = 'info', durationMs = 3000) {
   }, durationMs);
 }
 
-// Attach to window object
+// Global namespace
 window.WebRTCUtils = {
   objectFitRect,
   IceCandidateQueue,

@@ -36,8 +36,28 @@ function startServer() {
     pingInterval: 10_000
   });
 
+  // Enforce MAX_CONNECTIONS cap (N07)
+  io.use((socket, next) => {
+    if (roomStore.activeConnectionsCount >= config.MAX_CONNECTIONS) {
+      logger.warn(`Rejected connection: MAX_CONNECTIONS (${config.MAX_CONNECTIONS}) reached.`);
+      return next(new Error('Server full. Maximum connections reached.'));
+    }
+    next();
+  });
+
   // Attach WebRTC Signaling handlers
   attachSignaling(io);
+
+  // Periodic GC listener to disconnect expired clients (N08)
+  setInterval(() => {
+    roomStore.sweep((socketId, roomCode) => {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.emit('room-closed', { reason: 'Room expired due to inactivity' });
+        socket.disconnect(true);
+      }
+    });
+  }, config.ROOM_GC_INTERVAL_MS).unref();
 
   // Start HTTP Redirect Server
   const redirectServer = createHttpRedirectServer();
@@ -49,16 +69,11 @@ function startServer() {
 
   // Start HTTPS Server
   httpsServer.listen(config.PORT, '0.0.0.0', () => {
-    console.log('');
-    console.log('🚀 WebRTC Object Detection Server v2.1.0');
-    console.log('═'.repeat(55));
-    console.log(`🔒 HTTPS Desktop:  https://localhost:${config.PORT}`);
-    console.log(`📱 Phone Stream:   https://${primaryLANIP}:${config.PORT}/phone`);
-    console.log(`🌐 Primary LAN IP: ${primaryLANIP}`);
-    console.log(`📡 Listening on:   0.0.0.0:${config.PORT}`);
-    console.log('═'.repeat(55));
-    console.log('💡 Accept the self-signed certificate warning once in your browser.');
-    console.log('');
+    logger.info(`WebRTC Object Detection Server listening on 0.0.0.0:${config.PORT}`, {
+      httpsUrl: `https://localhost:${config.PORT}`,
+      phoneUrl: `https://${primaryLANIP}:${config.PORT}/phone`,
+      lanIp: primaryLANIP
+    });
   });
 
   // Graceful Shutdown

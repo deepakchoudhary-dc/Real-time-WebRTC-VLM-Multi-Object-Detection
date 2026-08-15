@@ -19,17 +19,23 @@ class PhoneCameraApp {
     this.localStream = null;
     this.overlayCanvas = null;
     this.overlayCtx = null;
+    this.resizeObserver = null;
 
     this.roomCode = null;
-    this.roomToken = null;
+    this.phoneToken = null;
 
     this.facingMode = 'environment'; // Default back camera
     this.isHD = false;
+
+    // Detection mode: if detect=desktop is set, mobile skips local AI inference (N21)
+    const urlParams = new URLSearchParams(window.location.search);
+    this.disablePhoneInference = urlParams.get('detect') === 'desktop';
 
     // AI Detector
     this.detector = new window.ObjectDetector();
     this.detectionInterval = 180; // ms (~5.5 FPS mobile inference)
     this.detectionTimer = null;
+    this.metricsTimer = null;
     this.isDetecting = false;
 
     // Metrics
@@ -44,19 +50,23 @@ class PhoneCameraApp {
 
   async init() {
     this.setupDOM();
+    this.setupCanvas();
     this.parseRoomCredentials();
     this.setupSocketEvents();
-    await this.initDetector();
+    
+    if (!this.disablePhoneInference) {
+      await this.initDetector();
+    }
   }
 
-  // ── 1. Parse Credentials from QR Code URL ─────────────────────────
+  // ── 1. Parse Credentials from QR Code URL (N05) ───────────────────
   parseRoomCredentials() {
     const params = new URLSearchParams(window.location.search);
     this.roomCode = params.get('room');
-    this.roomToken = params.get('token');
+    this.phoneToken = params.get('token');
 
-    if (!this.roomCode) {
-      this.showError('No room code provided. Please scan the QR code from the desktop.');
+    if (!this.roomCode || !this.phoneToken) {
+      this.showError('Authentication token or room code missing. Please re-scan QR code from desktop.');
     }
   }
 
@@ -66,33 +76,64 @@ class PhoneCameraApp {
     document.getElementById('flipBtn')?.addEventListener('click', () => this.toggleCamera());
     document.getElementById('qualityBtn')?.addEventListener('click', () => this.toggleQuality());
 
-    this.overlayCanvas = document.getElementById('overlayCanvas');
-    if (this.overlayCanvas) {
-      this.overlayCtx = this.overlayCanvas.getContext('2d');
-    }
-
-    // Lifecycle cleanups (L47)
+    // Lifecycle cleanups & bfcache restoration (N24, N25)
     window.addEventListener('pagehide', () => this.dispose());
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted && !this.localStream) {
+        console.log('Restored from bfcache, re-initializing camera...');
+        this.startCamera();
+      }
+    });
+
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         this.stopDetectionLoop();
-      } else if (this.localStream) {
+      } else if (this.localStream && !this.disablePhoneInference) {
         this.startDetectionLoop();
       }
     });
   }
 
-  // ── 3. Detector Initialization ────────────────────────────────────
-  async initDetector() {
-    await this.detector.loadModel();
+  // ── 3. Canvas & ResizeObserver (N23) ──────────────────────────────
+  setupCanvas() {
+    this.overlayCanvas = document.getElementById('overlayCanvas');
+    if (this.overlayCanvas) {
+      this.overlayCtx = this.overlayCanvas.getContext('2d');
+    }
+
+    const videoWrapper = document.getElementById('videoWrapper');
+    if (videoWrapper && window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
+      this.resizeObserver.observe(videoWrapper);
+    }
   }
 
-  // ── 4. WebRTC Setup ───────────────────────────────────────────────
+  resizeCanvas() {
+    const video = document.getElementById('localVideo');
+    if (!video || !this.overlayCanvas || !this.overlayCtx) return;
+
+    const rect = video.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    this.overlayCanvas.width = rect.width * dpr;
+    this.overlayCanvas.height = rect.height * dpr;
+    this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // ── 4. Detector Initialization (N20) ──────────────────────────────
+  async initDetector() {
+    const loaded = await this.detector.loadModel();
+    if (!loaded) {
+      console.warn('Failed to load on-device detector.');
+    }
+  }
+
+  // ── 5. WebRTC Setup ───────────────────────────────────────────────
   async initWebRTC() {
     const iceConfig = await window.WebRTCUtils.fetchIceConfig();
     this.peerConnection = new RTCPeerConnection(iceConfig);
 
-    // Phone is the impolite peer in Perfect Negotiation (impolite = makes offers)
+    // Phone is the impolite peer in Perfect Negotiation
     this.negotiator = new window.WebRTCUtils.PerfectNegotiator(
       this.peerConnection,
       this.socket,
@@ -113,17 +154,22 @@ class PhoneCameraApp {
     };
   }
 
-  // ── 5. Socket Events & Room Join ──────────────────────────────────
+  // ── 6. Socket Events & Room Join (N05) ────────────────────────────
   setupSocketEvents() {
     this.socket.on('connect', () => {
       console.log('Socket connected:', this.socket.id);
-      if (this.roomCode && this.roomToken) {
+      if (this.roomCode && this.phoneToken) {
         this.socket.emit('join-room', {
           roomCode: this.roomCode,
           role: 'phone',
-          token: this.roomToken
+          token: this.phoneToken
         });
       }
+    });
+
+    this.socket.on('connect_error', (err) => {
+      console.warn('Socket connect error:', err);
+      this.updateStatusBadge('disconnected');
     });
 
     this.socket.on('room-joined', (data) => {
@@ -141,13 +187,19 @@ class PhoneCameraApp {
       this.updateStatusBadge('disconnected');
     });
 
+    this.socket.on('room-closed', (data) => {
+      console.warn('Room closed:', data?.reason);
+      this.showError('Session expired. Please scan a fresh QR code from the desktop.');
+      this.dispose();
+    });
+
     this.socket.on('error-message', (err) => {
       console.error('Room join rejected:', err);
       this.showError(err.error || err.message || 'Access denied.');
     });
   }
 
-  // ── 6. Camera Initialization & Video Flow ─────────────────────────
+  // ── 7. Camera Initialization & Video Flow ─────────────────────────
   async startCamera() {
     const permOverlay = document.getElementById('permOverlay');
     const videoWrapper = document.getElementById('videoWrapper');
@@ -161,11 +213,15 @@ class PhoneCameraApp {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
       const video = document.getElementById('localVideo');
-      video.srcObject = this.localStream;
-      video.onloadedmetadata = () => {
-        this.resizeCanvas();
-        this.startDetectionLoop();
-      };
+      if (video) {
+        video.srcObject = this.localStream;
+        video.onloadedmetadata = () => {
+          this.resizeCanvas();
+          if (!this.disablePhoneInference) {
+            this.startDetectionLoop();
+          }
+        };
+      }
 
       await this.initWebRTC();
 
@@ -173,7 +229,7 @@ class PhoneCameraApp {
       if (videoWrapper) videoWrapper.style.display = 'block';
       if (controlsPanel) controlsPanel.style.display = 'flex';
 
-      this.updateMetricsDisplayLoop();
+      this.startMetricsLoop();
     } catch (err) {
       console.error('Camera access failed:', err);
       this.showError(this.formatCameraError(err));
@@ -213,7 +269,7 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 7. Flip Camera & Quality Switch ───────────────────────────────
+  // ── 8. Flip Camera & Quality Switch ───────────────────────────────
   async toggleCamera() {
     this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
 
@@ -228,7 +284,6 @@ class PhoneCameraApp {
 
     if (!this.localStream) return;
 
-    // Stop old tracks
     this.localStream.getTracks().forEach((t) => t.stop());
 
     try {
@@ -236,9 +291,8 @@ class PhoneCameraApp {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
       const video = document.getElementById('localVideo');
-      video.srcObject = this.localStream;
+      if (video) video.srcObject = this.localStream;
 
-      // Replace WebRTC sender track seamlessly (F10 fix)
       const newVideoTrack = this.localStream.getVideoTracks()[0];
       const sender = this.peerConnection
         ?.getSenders()
@@ -258,11 +312,11 @@ class PhoneCameraApp {
     if (btn) {
       btn.textContent = this.isHD ? '📺 SD' : '📺 HD';
       btn.classList.toggle('active', this.isHD);
+      btn.setAttribute('aria-pressed', this.isHD ? 'true' : 'false');
     }
 
     const videoTrack = this.localStream?.getVideoTracks()[0];
     if (videoTrack && videoTrack.applyConstraints) {
-      // Use applyConstraints directly to avoid camera restarts (L35 fix)
       try {
         await videoTrack.applyConstraints({
           width: { ideal: this.isHD ? 1280 : 640 },
@@ -274,22 +328,9 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 8. Canvas Sizing & Drawing ────────────────────────────────────
-  resizeCanvas() {
-    const video = document.getElementById('localVideo');
-    if (!video || !this.overlayCanvas) return;
-
-    const rect = video.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-
-    this.overlayCanvas.width = rect.width * dpr;
-    this.overlayCanvas.height = rect.height * dpr;
-    this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  // ── 9. Detection Loop ─────────────────────────────────────────────
+  // ── 9. Detection Loop (Single-sided Mobile Inference, N21) ────────
   startDetectionLoop() {
-    if (this.detectionTimer) return;
+    if (this.detectionTimer || this.disablePhoneInference) return;
 
     this.detectionTimer = setInterval(async () => {
       if (this.isDetecting) return;
@@ -306,10 +347,10 @@ class PhoneCameraApp {
           this.activeObjects = detections.length;
           this.frameCount++;
 
-          // Draw bounding boxes locally on phone screen
+          // Render on mobile HUD
           this.drawPhoneOverlays(detections);
 
-          // Relay detections to desktop via server
+          // Relay to desktop via server (N15)
           this.socket.emit('detection-result', {
             frame_id: `frame_${captureTs}`,
             capture_ts: captureTs,
@@ -359,7 +400,6 @@ class PhoneCameraApp {
       const boxW = (det.xmax - det.xmin) * fitRect.width;
       const boxH = (det.ymax - det.ymin) * fitRect.height;
 
-      // Handle front-camera mirroring (F12 fix)
       if (this.facingMode === 'user') {
         boxX = width - (boxX + boxW);
       }
@@ -383,9 +423,11 @@ class PhoneCameraApp {
     });
   }
 
-  // ── 10. Metrics HUD Loop ──────────────────────────────────────────
-  updateMetricsDisplayLoop() {
-    setInterval(() => {
+  // ── 10. Metrics HUD Loop (N24) ────────────────────────────────────
+  startMetricsLoop() {
+    if (this.metricsTimer) clearInterval(this.metricsTimer);
+
+    this.metricsTimer = setInterval(() => {
       const now = Date.now();
       if (now - this.lastFpsTs >= 1000) {
         this.currentFps = this.frameCount;
@@ -421,11 +463,22 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 11. Cleanup Lifecycle ─────────────────────────────────────────
+  // ── 11. Cleanup Lifecycle (N24, N25) ──────────────────────────────
   dispose() {
     this.stopDetectionLoop();
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer);
+      this.metricsTimer = null;
+    }
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+    }
+    if (this.detector) {
+      this.detector.dispose();
+    }
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());
+      this.localStream = null;
     }
     if (this.negotiator) this.negotiator.dispose();
     if (this.peerConnection) this.peerConnection.close();
