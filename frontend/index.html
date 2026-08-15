@@ -3,24 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Real-time WebRTC object detection using TensorFlow.js COCO-SSD. Stream from phone, detect in browser.">
-  <title>WebRTC Object Detection — Desktop Hub</title>
+  <meta name="description" content="Production WebRTC Real-Time Multi-Object Detection Dashboard with TensorFlow.js COCO-SSD">
+  <title>Vision Hub — Real-Time Object Detection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-primary: #0b0d17;
-      --bg-surface: #141726;
-      --bg-card: rgba(255, 255, 255, 0.04);
+      --bg-primary: #0a0c10;
+      --bg-surface: #12161f;
+      --bg-card: rgba(22, 28, 38, 0.7);
       --border-subtle: rgba(255, 255, 255, 0.08);
-      --accent-purple: #7c5cfc;
-      --accent-blue: #339af0;
+      --border-focus: rgba(81, 207, 102, 0.4);
       --accent-green: #51cf66;
+      --accent-blue: #339af0;
+      --accent-purple: #845ef7;
       --accent-red: #ff6b6b;
       --accent-amber: #fcc419;
-      --text-main: #f1f3f9;
-      --text-muted: #8b92a5;
+      --text-primary: #f8f9fa;
+      --text-secondary: #909296;
+      --text-muted: #5c5f66;
       --radius-sm: 8px;
       --radius-md: 14px;
       --radius-lg: 20px;
@@ -30,19 +32,11 @@
 
     body {
       font-family: 'Inter', system-ui, -apple-system, sans-serif;
-      background: var(--bg-primary);
-      color: var(--text-main);
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
-    }
-
-    .container {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 24px;
-      width: 100%;
-      flex: 1;
     }
 
     /* ── Header ── */
@@ -50,84 +44,110 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 24px;
-      padding-bottom: 16px;
+      padding: 16px 28px;
+      background: rgba(18, 22, 31, 0.8);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border-subtle);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      font-size: 1.5rem;
+      background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue));
+      padding: 6px 10px;
+      border-radius: var(--radius-sm);
+      display: inline-block;
     }
 
     .brand-title {
-      font-size: 1.6rem;
+      font-size: 1.15rem;
       font-weight: 700;
-      background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue), var(--accent-green));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .status-pill {
       display: flex;
       align-items: center;
       gap: 8px;
-    }
-
-    .badge-group {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
       padding: 6px 14px;
       border-radius: 20px;
-      font-size: 0.78rem;
-      font-weight: 500;
-      background: rgba(124, 92, 252, 0.12);
-      border: 1px solid rgba(124, 92, 252, 0.25);
-      color: #d1c4e9;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid var(--border-subtle);
     }
 
-    /* ── Model Banner ── */
-    #modelStatus {
-      padding: 10px 18px;
-      border-radius: var(--radius-sm);
-      font-size: 0.85rem;
-      font-weight: 500;
-      background: rgba(51, 154, 240, 0.15);
-      border: 1px solid rgba(51, 154, 240, 0.3);
-      color: #90caf9;
-      text-align: center;
-      margin-bottom: 20px;
-      transition: all 0.3s ease;
-      display: none;
+    .status-connected {
+      background: rgba(81, 207, 102, 0.12);
+      color: var(--accent-green);
+      border-color: rgba(81, 207, 102, 0.3);
+    }
+
+    .status-connecting {
+      background: rgba(252, 196, 25, 0.12);
+      color: var(--accent-amber);
+      border-color: rgba(252, 196, 25, 0.3);
+    }
+
+    .status-disconnected {
+      background: rgba(255, 107, 107, 0.12);
+      color: var(--accent-red);
+      border-color: rgba(255, 107, 107, 0.3);
     }
 
     /* ── Main Layout ── */
-    .main-grid {
+    main {
+      flex: 1;
+      padding: 24px 28px;
       display: grid;
       grid-template-columns: 1fr 340px;
       gap: 24px;
+      max-width: 1600px;
+      margin: 0 auto;
+      width: 100%;
     }
 
-    /* ── Video Viewport ── */
-    .viewport-card {
-      background: var(--bg-surface);
-      border-radius: var(--radius-md);
-      padding: 16px;
-      border: 1px solid var(--border-subtle);
+    @media (max-width: 1080px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    /* ── Left Stage (Video & Overlays) ── */
+    .stage-section {
       display: flex;
       flex-direction: column;
+      gap: 16px;
     }
 
-    .video-wrapper {
+    .video-viewport {
       position: relative;
-      width: 100%;
       background: #000;
-      border-radius: 12px;
+      border-radius: var(--radius-lg);
       overflow: hidden;
-      aspect-ratio: 16/9;
+      aspect-ratio: 16 / 9;
+      border: 1px solid var(--border-subtle);
       display: flex;
-      align-items: center;
       justify-content: center;
+      align-items: center;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     }
 
     #remoteVideo {
@@ -137,298 +157,331 @@
       display: none;
     }
 
-    .overlay-canvas {
+    #overlayCanvas {
       position: absolute;
-      top: 0;
-      left: 0;
+      inset: 0;
       width: 100%;
       height: 100%;
       pointer-events: none;
     }
 
-    .waiting-indicator {
+    .viewport-placeholder {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      gap: 16px;
-      color: var(--text-muted);
-      font-size: 0.95rem;
+      gap: 12px;
+      color: var(--text-secondary);
+      text-align: center;
+      padding: 20px;
     }
 
     .spinner {
-      width: 38px;
-      height: 38px;
+      width: 40px;
+      height: 40px;
       border: 3px solid rgba(255, 255, 255, 0.1);
-      border-top: 3px solid var(--accent-purple);
+      border-top-color: var(--accent-blue);
       border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      animation: spin 1s linear infinite;
     }
 
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Metrics Bar ── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
     }
 
-    /* ── Sidebar ── */
-    .sidebar {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
+    @media (max-width: 640px) {
+      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
-    .card {
-      background: var(--bg-surface);
-      border-radius: var(--radius-md);
-      padding: 18px;
+    .metric-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(8px);
       border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
     }
 
-    .card-title {
-      font-size: 0.85rem;
-      font-weight: 600;
-      margin-bottom: 12px;
-      color: var(--text-muted);
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      letter-spacing: 0.04em;
     }
 
-    /* ── QR Section ── */
-    .qr-card { text-align: center; }
-
-    .qr-container {
-      width: 190px;
-      height: 190px;
-      margin: 10px auto;
-      background: #fff;
-      border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    }
-
-    .qr-container img {
-      max-width: 176px;
-      max-height: 176px;
-    }
-
-    .room-code-tag {
-      display: inline-block;
-      padding: 4px 14px;
-      margin-top: 8px;
-      background: rgba(124, 92, 252, 0.2);
-      border: 1px solid rgba(124, 92, 252, 0.4);
-      border-radius: 6px;
+    .metric-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.35rem;
       font-weight: 700;
-      font-size: 1.15rem;
-      letter-spacing: 2px;
-      color: #b197fc;
+      color: var(--text-primary);
     }
 
-    #connectionUrl {
-      font-size: 0.72rem;
-      color: var(--text-muted);
-      word-break: break-all;
-      margin-top: 8px;
-      font-family: monospace;
-    }
-
-    /* ── Status Pill ── */
-    .status-pill {
-      padding: 10px;
-      border-radius: 10px;
-      text-align: center;
-      font-weight: 600;
-      font-size: 0.85rem;
-      transition: all 0.3s ease;
-    }
-
-    .status-disconnected { background: rgba(255, 107, 107, 0.15); color: var(--accent-red); border: 1px solid rgba(255, 107, 107, 0.3); }
-    .status-connecting { background: rgba(252, 196, 25, 0.15); color: var(--accent-amber); border: 1px solid rgba(252, 196, 25, 0.3); }
-    .status-connected { background: rgba(81, 207, 102, 0.15); color: var(--accent-green); border: 1px solid rgba(81, 207, 102, 0.3); }
-
-    /* ── Metric Rows ── */
-    .metric-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 0;
-    }
-
-    .metric-row + .metric-row {
-      border-top: 1px solid rgba(255, 255, 255, 0.04);
-    }
-
-    .metric-label { color: var(--text-muted); font-size: 0.82rem; }
-    .metric-val { font-weight: 600; font-size: 0.95rem; color: var(--accent-green); font-family: monospace; }
-
-    /* ── Buttons & Controls ── */
-    .action-stack {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .btn {
-      padding: 10px 16px;
-      border: none;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      font-family: inherit;
-      font-weight: 600;
-      font-size: 0.82rem;
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-    }
-
-    .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
-    .btn:active { transform: translateY(0); }
-    .btn:focus-visible { outline: 2px solid var(--accent-purple); outline-offset: 2px; }
-
-    .btn-primary { background: linear-gradient(135deg, var(--accent-purple), #5c3fd1); color: #fff; }
-    .btn-secondary { background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border-subtle); }
-    .btn-danger { background: rgba(255, 107, 107, 0.15); color: var(--accent-red); border: 1px solid rgba(255, 107, 107, 0.3); }
-
-    /* ── Detection Feed ── */
-    .detection-list {
-      max-height: 170px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .detection-chip {
-      background: rgba(81, 207, 102, 0.08);
-      padding: 6px 10px;
-      border-radius: 6px;
-      font-size: 0.8rem;
-      border-left: 3px solid var(--accent-green);
-      display: flex;
-      justify-content: space-between;
-    }
-
-    /* ── Chart ── */
+    /* ── Chart Drawer ── */
     #chartContainer {
-      border-radius: 10px;
-      overflow: hidden;
-      background: rgba(0, 0, 0, 0.4);
-      padding: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 16px;
       display: none;
     }
 
     #latencyCanvas {
-      display: block;
       width: 100%;
       height: 120px;
+      display: block;
     }
 
-    @media (max-width: 900px) {
-      .main-grid { grid-template-columns: 1fr; }
-      header { flex-direction: column; gap: 12px; text-align: center; }
+    /* ── Right Panel (Pairing & Feed) ── */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .panel-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .panel-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .qr-wrapper {
+      display: flex;
+      justify-content: center;
+      background: #fff;
+      padding: 12px;
+      border-radius: var(--radius-md);
+      width: 190px;
+      height: 190px;
+      margin: 0 auto;
+    }
+
+    .qr-wrapper img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .room-badge {
+      font-family: 'JetBrains Mono', monospace;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px dashed var(--border-subtle);
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      text-align: center;
+      font-size: 0.9rem;
+      color: var(--accent-blue);
+    }
+
+    .action-btn-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-subtle);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.2s;
+    }
+
+    .btn:hover { background: rgba(255, 255, 255, 0.12); }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue)); border: none; }
+    .btn-primary:hover { opacity: 0.95; }
+
+    /* ── Mode Toggle ── */
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      padding: 6px 0;
+      border-top: 1px solid var(--border-subtle);
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 38px;
+      height: 20px;
+    }
+
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background-color: rgba(255,255,255,0.2);
+      border-radius: 20px;
+      transition: .3s;
+    }
+    .slider:before {
+      position: absolute; content: "";
+      height: 14px; width: 14px; left: 3px; bottom: 3px;
+      background-color: white; border-radius: 50%;
+      transition: .3s;
+    }
+    input:checked + .slider { background-color: var(--accent-blue); }
+    input:checked + .slider:before { transform: translateX(18px); }
+
+    /* ── Detection Feed ── */
+    .feed-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 120px;
+    }
+
+    .detection-chip {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .model-banner {
+      background: rgba(132, 94, 247, 0.15);
+      border: 1px solid rgba(132, 94, 247, 0.35);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      font-size: 0.78rem;
+      display: none;
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div class="brand-title">
-        <span>🎯</span> WebRTC Object Detection
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <span class="brand-icon" aria-hidden="true">👁️</span>
+      <div>
+        <h1 class="brand-title">WebRTC Vision Hub</h1>
+        <div class="brand-subtitle">Real-Time Wireless AI Vision Platform</div>
       </div>
-      <div class="badge-group">
-        <span class="badge">🧠 TensorFlow.js COCO-SSD</span>
-        <span class="badge">🔒 Privacy-First P2P</span>
-        <span class="badge">⚡ WebGL GPU</span>
+    </div>
+
+    <div class="header-actions">
+      <div class="status-pill status-disconnected" id="connectionStatus" role="status" aria-live="polite">
+        📱 Disconnected
       </div>
-    </header>
+    </div>
+  </header>
 
-    <div id="modelStatus" role="status" aria-live="polite">🧠 Initializing AI Detector...</div>
+  <!-- Main View -->
+  <main>
+    <!-- Left Stage -->
+    <section class="stage-section">
+      <div class="model-banner" id="modelStatus" role="alert"></div>
 
-    <main class="main-grid">
-      <!-- Video / Detection Viewport -->
-      <section class="viewport-card" aria-label="Video Stream and AI Bounding Boxes">
-        <div class="video-wrapper" id="videoContainer">
-          <div class="waiting-indicator" id="loadingIndicator">
-            <div class="spinner" aria-hidden="true"></div>
-            <span>Waiting for mobile camera stream...</span>
-          </div>
-          <video id="remoteVideo" autoplay playsinline muted></video>
-          <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
+      <div class="video-viewport" id="videoContainer">
+        <div class="viewport-placeholder" id="loadingIndicator">
+          <div class="spinner" aria-hidden="true"></div>
+          <div>Waiting for mobile camera stream...</div>
+          <div style="font-size: 0.8rem; color: var(--text-muted);">Scan QR code on the right with your phone camera</div>
         </div>
-      </section>
+        <video id="remoteVideo" autoplay playsinline muted></video>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
 
-      <!-- Sidebar Controls & Metrics -->
-      <aside class="sidebar" aria-label="Session Controls and Metrics">
-        <!-- QR Code Pairing -->
-        <div class="card qr-card">
-          <div class="card-title">📱 Connect Phone</div>
-          <p style="font-size: 0.78rem; color: var(--text-muted);">Scan with your mobile camera</p>
-          <div class="qr-container" id="qrCodeContainer">
-            <div class="spinner" aria-hidden="true"></div>
-          </div>
-          <div class="room-code-tag" id="roomCodeDisplay">------</div>
-          <div id="connectionUrl"></div>
+      <!-- Performance Metrics -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <span class="metric-label">Latency (E2E)</span>
+          <span class="metric-value" id="latencyMetric">—</span>
         </div>
-
-        <!-- Connection Status -->
-        <div class="status-pill status-disconnected" id="connectionStatus" role="status">
-          📱 Disconnected
+        <div class="metric-card">
+          <span class="metric-label">FPS</span>
+          <span class="metric-value" id="fpsMetric">—</span>
         </div>
-
-        <!-- Live Metrics -->
-        <div class="card" aria-label="Live Metrics">
-          <div class="card-title">📊 Real-Time Metrics</div>
-          <div class="metric-row">
-            <span class="metric-label">Latency (E2E)</span>
-            <span class="metric-val" id="latencyMetric">—</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Processing FPS</span>
-            <span class="metric-val" id="fpsMetric">—</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Frames Processed</span>
-            <span class="metric-val" id="processedMetric">0</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-label">Active Objects</span>
-            <span class="metric-val" id="objectsMetric">0</span>
-          </div>
+        <div class="metric-card">
+          <span class="metric-label">Objects</span>
+          <span class="metric-value" id="objectsMetric">0</span>
         </div>
+        <div class="metric-card">
+          <span class="metric-label">Processed Frames</span>
+          <span class="metric-value" id="processedMetric">0</span>
+        </div>
+      </div>
 
-        <!-- Actions -->
-        <div class="action-stack">
-          <button class="btn btn-primary" id="benchmarkBtn">⏱️ Run 30s Benchmark</button>
-          <button class="btn btn-secondary" id="performanceBtn">📈 Performance Chart</button>
-          <button class="btn btn-secondary" id="downloadBtn">📥 Export Metrics JSON</button>
-          <button class="btn btn-danger" id="resetBtn">🔄 Reset Metrics</button>
+      <!-- Chart Drawer -->
+      <div id="chartContainer">
+        <canvas id="latencyCanvas" width="800" height="120"></canvas>
+      </div>
+    </section>
+
+    <!-- Right Sidebar -->
+    <aside class="sidebar">
+      <!-- Pairing Card -->
+      <div class="panel-card">
+        <div class="panel-title">📱 Connect Mobile Camera</div>
+        <div class="qr-wrapper" id="qrCodeContainer">
+          <div class="spinner" style="margin: auto;"></div>
+        </div>
+        <div class="room-badge">
+          Room Code: <strong id="roomCodeDisplay">------</strong>
         </div>
 
-        <!-- Performance Chart -->
-        <div class="card" id="chartContainer">
-          <canvas id="latencyCanvas" width="300" height="120"></canvas>
+        <div class="toggle-row">
+          <span>⚙️ Detect on Desktop:</span>
+          <label class="switch" aria-label="Toggle Desktop Detection Mode">
+            <input type="checkbox" id="detectModeToggle">
+            <span class="slider"></span>
+          </label>
         </div>
 
-        <!-- Detections Feed -->
-        <div class="card">
-          <div class="card-title">🎯 Detected Objects</div>
-          <div class="detection-list" id="detectionList" aria-live="polite">
-            <div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 12px;">
-              No detections yet
-            </div>
-          </div>
+        <div class="action-btn-row">
+          <button class="btn btn-primary" id="benchmarkBtn">⏱️ 30s Benchmark</button>
+          <button class="btn" id="performanceBtn">📈 Chart</button>
         </div>
-      </aside>
-    </main>
-  </div>
+        <div class="action-btn-row">
+          <button class="btn" id="downloadBtn">💾 Export JSON</button>
+          <button class="btn" id="resetBtn">🔄 Reset</button>
+        </div>
+      </div>
+
+      <!-- Detection Feed -->
+      <div class="panel-card">
+        <div class="panel-title">🏷️ Live Detections</div>
+        <div class="feed-container" id="detectionList">
+          <div style="font-size: 0.8rem; color: var(--text-muted); text-align: center; margin: auto;">No detections yet</div>
+        </div>
+      </div>
+    </aside>
+  </main>
 
   <!-- Scripts -->
   <script src="/socket.io/socket.io.js"></script>

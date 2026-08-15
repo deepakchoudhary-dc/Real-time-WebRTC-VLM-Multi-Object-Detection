@@ -27,8 +27,9 @@ class DesktopApp {
 
     // AI Detector (optional desktop fallback detection, N21)
     this.detector = new window.ObjectDetector();
-    this.detectOnDesktop = new URLSearchParams(window.location.search).get('detect') === 'desktop';
+    this.detectOnDesktop = false;
     this.desktopDetectionLoop = null;
+    this.isDetectingDesktop = false; // Re-entrancy guard (R09)
 
     // Metrics state (Single-source truth, fixes L25 double count)
     this.processedFrames = 0;
@@ -60,10 +61,6 @@ class DesktopApp {
     this.setupSocketEvents();
     await this.initWebRTC();
     await this.fetchOrRestoreRoom();
-
-    if (this.detectOnDesktop) {
-      await this.initDesktopDetector();
-    }
   }
 
   // ── 1. DOM & Event Wiring ─────────────────────────────────────────
@@ -73,16 +70,42 @@ class DesktopApp {
     document.getElementById('downloadBtn')?.addEventListener('click', () => this.downloadMetrics());
     document.getElementById('resetBtn')?.addEventListener('click', () => this.resetMetrics());
 
-    // Pagehide / Visibility cleanup (N25)
+    // Detection Mode Toggle (R15)
+    const modeToggle = document.getElementById('detectModeToggle');
+    if (modeToggle) {
+      modeToggle.addEventListener('change', async (e) => {
+        this.detectOnDesktop = e.target.checked;
+        if (this.detectOnDesktop) {
+          await this.initDesktopDetector();
+          if (this.remoteStream) this.startDesktopDetection();
+        } else {
+          this.stopDesktopDetection();
+        }
+        await this.createNewRoom(); // Refresh QR with mode param
+      });
+    }
+
+    // Pagehide / Pageshow Lifecycle (R04, N25)
     window.addEventListener('pagehide', () => this.dispose());
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted && !this.socket.connected) {
+        this.socket.connect();
+        this.fetchOrRestoreRoom();
+      }
+    });
+
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         if (this.rAfHandle) {
           cancelAnimationFrame(this.rAfHandle);
           this.rAfHandle = null;
         }
-      } else if (this.remoteStream) {
-        this.startRenderLoop();
+        this.stopDesktopDetection(); // Pause detection on hidden (R09)
+      } else {
+        if (this.remoteStream) {
+          this.startRenderLoop();
+          if (this.detectOnDesktop) this.startDesktopDetection();
+        }
       }
     });
   }
@@ -113,7 +136,7 @@ class DesktopApp {
     this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  // ── 3. WebRTC Setup & Perfect Negotiation ─────────────────────────
+  // ── 3. WebRTC Setup & Perfect Negotiation (R03 Single Owner) ─────
   async initWebRTC() {
     const iceConfig = await window.WebRTCUtils.fetchIceConfig();
     this.peerConnection = new RTCPeerConnection(iceConfig);
@@ -122,11 +145,13 @@ class DesktopApp {
     this.negotiator = new window.WebRTCUtils.PerfectNegotiator(
       this.peerConnection,
       this.socket,
-      { isPolite: true }
+      {
+        isPolite: true,
+        onStateChange: (state) => this.updateConnectionBadge(state) // Single owner (R03)
+      }
     );
 
     this.peerConnection.ontrack = (event) => {
-      console.log('📺 Received remote video track');
       this.remoteStream = event.streams[0];
       const video = document.getElementById('remoteVideo');
       const loader = document.getElementById('loadingIndicator');
@@ -144,18 +169,11 @@ class DesktopApp {
       }
       if (loader) loader.style.display = 'none';
     };
-
-    this.peerConnection.onconnectionstatechange = () => {
-      const state = this.peerConnection.connectionState;
-      console.log(`WebRTC connection state: ${state}`);
-      this.updateConnectionBadge(state);
-    };
   }
 
-  // ── 4. Room & QR Code Management with Session Persistence (N05, N11) ─
+  // ── 4. Room & QR Code with Session Persistence & Rejoin Backoff (N05, N11, R08) ─
   async fetchOrRestoreRoom() {
     try {
-      // Check for saved session in sessionStorage (N11)
       const savedSession = sessionStorage.getItem('webrtc_desktop_session');
       if (savedSession) {
         try {
@@ -165,62 +183,71 @@ class DesktopApp {
             this.desktopToken = parsed.desktopToken;
             this.csrfToken = parsed.csrfToken;
 
-            // Render existing QR & room info
             this.renderRoomDetails(parsed);
-
-            // Rejoin existing room
-            this.socket.emit('join-room', {
-              roomCode: this.roomCode,
-              role: 'desktop',
-              token: this.desktopToken
-            }, (ack) => {
-              if (ack && ack.success) {
-                console.log('Reconnected to existing desktop room session.');
-                return;
-              }
-              // Room expired, create new one
-              this.createNewRoom();
-            });
+            await this.attemptRejoinWithBackoff(parsed.roomCode, parsed.desktopToken);
             return;
           }
         } catch {
-          // Invalid session, create new
+          // Bad session
         }
       }
 
       await this.createNewRoom();
-    } catch (err) {
-      console.error('Failed to initialize room:', err);
+    } catch {
       window.WebRTCUtils.showToast('Failed to initialize session room. Check server connection.', 'error');
     }
   }
 
-  async createNewRoom() {
-    const res = await fetch('/api/qr');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    this.roomCode = data.roomCode;
-    this.desktopToken = data.desktopToken;
-    this.csrfToken = data.csrfToken;
-
-    // Save session in sessionStorage (N11)
-    sessionStorage.setItem('webrtc_desktop_session', JSON.stringify({
-      roomCode: this.roomCode,
-      desktopToken: this.desktopToken,
-      csrfToken: this.csrfToken,
-      qr: data.qr,
-      url: data.url
-    }));
-
-    this.renderRoomDetails(data);
-
-    // Join room as desktop presenting desktopToken (N05)
+  async attemptRejoinWithBackoff(roomCode, desktopToken, attempt = 1) {
     this.socket.emit('join-room', {
-      roomCode: this.roomCode,
+      roomCode,
       role: 'desktop',
-      token: this.desktopToken
+      token: desktopToken
+    }, (ack) => {
+      if (ack && ack.success) {
+        return;
+      }
+
+      // Rejoin backoff retry (R08)
+      if (attempt <= 4 && ack && /occupied/i.test(ack.error || '')) {
+        setTimeout(() => {
+          this.attemptRejoinWithBackoff(roomCode, desktopToken, attempt + 1);
+        }, 500 * attempt);
+      } else {
+        this.createNewRoom();
+      }
     });
+  }
+
+  async createNewRoom() {
+    try {
+      const detectQuery = this.detectOnDesktop ? '?detect=desktop' : '';
+      const res = await fetch(`/api/qr${detectQuery}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      this.roomCode = data.roomCode;
+      this.desktopToken = data.desktopToken;
+      this.csrfToken = data.csrfToken;
+
+      sessionStorage.setItem('webrtc_desktop_session', JSON.stringify({
+        roomCode: this.roomCode,
+        desktopToken: this.desktopToken,
+        csrfToken: this.csrfToken,
+        qr: data.qr,
+        url: data.url
+      }));
+
+      this.renderRoomDetails(data);
+
+      this.socket.emit('join-room', {
+        roomCode: this.roomCode,
+        role: 'desktop',
+        token: this.desktopToken
+      });
+    } catch {
+      window.WebRTCUtils.showToast('Failed to create new room.', 'error');
+    }
   }
 
   renderRoomDetails(data) {
@@ -243,9 +270,7 @@ class DesktopApp {
   // ── 5. Socket Events ──────────────────────────────────────────────
   setupSocketEvents() {
     this.socket.on('connect', () => {
-      console.log('Socket connected:', this.socket.id);
       if (this.roomCode && this.desktopToken) {
-        // Idempotent rejoin on socket reconnection (F5, N09)
         this.socket.emit('join-room', {
           roomCode: this.roomCode,
           role: 'desktop',
@@ -254,29 +279,29 @@ class DesktopApp {
       }
     });
 
-    this.socket.on('connect_error', (err) => {
-      console.warn('Socket connect error:', err);
+    this.socket.on('connect_error', () => {
       window.WebRTCUtils.showToast('Signaling server connection error. Reconnecting...', 'error');
       this.updateConnectionBadge('disconnected');
     });
 
     this.socket.on('peer-joined', (data) => {
-      console.log(`📱 Mobile peer joined room: ${data.role}`);
       this.updateConnectionBadge('connecting');
       window.WebRTCUtils.showToast('Mobile camera connected!', 'success');
     });
 
     this.socket.on('peer-left', () => {
-      console.log('📱 Mobile peer left');
       this.updateConnectionBadge('disconnected');
       window.WebRTCUtils.showToast('Mobile camera disconnected.', 'info');
     });
 
     this.socket.on('room-closed', (data) => {
-      console.warn('Room closed by server:', data?.reason);
       sessionStorage.removeItem('webrtc_desktop_session');
       window.WebRTCUtils.showToast(data?.reason || 'Room closed. Refreshing session...', 'info');
-      setTimeout(() => this.createNewRoom(), 1000);
+      try {
+        setTimeout(() => this.createNewRoom(), 1000);
+      } catch {
+        // Safe catch (R09)
+      }
     });
 
     // Relay of detection results from phone (Single-sided pipeline, N15)
@@ -287,16 +312,18 @@ class DesktopApp {
     });
 
     this.socket.on('error-message', (err) => {
-      console.warn('Server error message:', err.message || err.error);
       window.WebRTCUtils.showToast(err.message || err.error, 'error');
     });
   }
 
-  // ── 6. Detection Processing & Rendering (N16 Canonical Metrics) ────
+  // ── 6. Detection Processing & Live Metrics (R01, R02, N16) ─────────
   handleDetectionFrame(result) {
     const now = Date.now();
-    // Canonical E2E Latency: Current time minus phone capture timestamp (N16)
+    // Canonical E2E Latency (N16)
     const latency = Math.max(0, now - (result.capture_ts || now));
+
+    // Report live latency measurement back to server for /api/metrics (R02)
+    this.socket.emit('metrics-report', { latency });
 
     // Single increment path (L25 fix)
     this.processedFrames++;
@@ -340,7 +367,6 @@ class DesktopApp {
       return;
     }
 
-    // Letterbox compensation (N23/L42)
     const fitRect = window.WebRTCUtils.objectFitRect(
       width,
       height,
@@ -374,25 +400,21 @@ class DesktopApp {
       const cornerLen = Math.min(boxW, boxH) * 0.18;
       this.overlayCtx.lineWidth = 4;
       this.overlayCtx.beginPath();
-      // Top Left
       this.overlayCtx.moveTo(boxX, boxY + cornerLen);
       this.overlayCtx.lineTo(boxX, boxY);
       this.overlayCtx.lineTo(boxX + cornerLen, boxY);
-      // Top Right
       this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY);
       this.overlayCtx.lineTo(boxX + boxW);
       this.overlayCtx.lineTo(boxX + boxW, boxY + cornerLen);
-      // Bottom Left
       this.overlayCtx.moveTo(boxX, boxY + boxH - cornerLen);
       this.overlayCtx.lineTo(boxX, boxY + boxH);
       this.overlayCtx.lineTo(boxX + cornerLen, boxY + boxH);
-      // Bottom Right
       this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY + boxH);
-      this.overlayCtx.lineTo(boxX + boxW, boxY + boxH);
+      this.overlayCtx.lineTo(boxX + boxW);
       this.overlayCtx.lineTo(boxX + boxW, boxY + boxH - cornerLen);
       this.overlayCtx.stroke();
 
-      // Label Tag
+      // Label Tag (Safe text drawing)
       const labelText = `${det.label} ${Math.round(det.score * 100)}%`;
       this.overlayCtx.font = '600 12px Inter, sans-serif';
       const textMetrics = this.overlayCtx.measureText(labelText);
@@ -412,7 +434,7 @@ class DesktopApp {
     this.overlayCtx.globalAlpha = 1.0;
   }
 
-  // ── 7. Desktop Fallback Detection Loop (N21) ──────────────────────
+  // ── 7. Desktop Fallback Detection Loop (N21, R09) ──────────────────
   async initDesktopDetector() {
     const banner = document.getElementById('modelStatus');
     if (banner) {
@@ -437,21 +459,36 @@ class DesktopApp {
     if (this.desktopDetectionLoop) return;
 
     this.desktopDetectionLoop = setInterval(async () => {
-      const video = document.getElementById('remoteVideo');
-      if (video && video.readyState >= 2 && this.detector.modelLoaded) {
-        const captureTs = Date.now();
-        const detections = await this.detector.detect(video);
-        const frame = {
-          capture_ts: captureTs,
-          inference_ts: Date.now(),
-          detections
-        };
-        this.handleDetectionFrame(frame);
+      if (this.isDetectingDesktop) return; // Re-entrancy guard (R09)
+      this.isDetectingDesktop = true;
+
+      try {
+        const video = document.getElementById('remoteVideo');
+        if (video && video.readyState >= 2 && this.detector.modelLoaded) {
+          const captureTs = Date.now();
+          const detections = await this.detector.detect(video);
+          const frame = {
+            capture_ts: captureTs,
+            inference_ts: Date.now(),
+            detections
+          };
+          this.handleDetectionFrame(frame);
+        }
+      } finally {
+        this.isDetectingDesktop = false;
       }
     }, 150);
   }
 
-  // ── 8. UI Updates & Live Metrics (N16) ─────────────────────────────
+  stopDesktopDetection() {
+    if (this.desktopDetectionLoop) {
+      clearInterval(this.desktopDetectionLoop);
+      this.desktopDetectionLoop = null;
+    }
+    this.isDetectingDesktop = false;
+  }
+
+  // ── 8. UI Updates & Safe Text Content Feed (R01) ───────────────────
   updateMetricsUI(latency, objectCount) {
     const latEl = document.getElementById('latencyMetric');
     const objEl = document.getElementById('objectsMetric');
@@ -487,7 +524,7 @@ class DesktopApp {
 
     detections.forEach((d) => {
       this.detectionFeed.unshift({
-        label: d.label,
+        label: String(d.label || '').substring(0, 32),
         score: d.score,
         ts: now
       });
@@ -498,10 +535,19 @@ class DesktopApp {
     if (!listEl) return;
 
     listEl.innerHTML = '';
+    // Safe textContent-only DOM construction (R01 fix)
     this.detectionFeed.slice(0, 5).forEach((item) => {
       const chip = document.createElement('div');
       chip.className = 'detection-chip';
-      chip.innerHTML = `<span>🏷️ ${item.label}</span><span>${Math.round(item.score * 100)}%</span>`;
+
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = `🏷️ ${item.label}`;
+
+      const scoreSpan = document.createElement('span');
+      scoreSpan.textContent = `${Math.round(item.score * 100)}%`;
+
+      chip.appendChild(labelSpan);
+      chip.appendChild(scoreSpan);
       listEl.appendChild(chip);
     });
   }
@@ -621,8 +667,7 @@ class DesktopApp {
         'success',
         6000
       );
-    } catch (err) {
-      console.error('Benchmark failed:', err);
+    } catch {
       window.WebRTCUtils.showToast('Benchmark failed to complete.', 'error');
     } finally {
       btn.disabled = false;
@@ -647,8 +692,8 @@ class DesktopApp {
         this.updateMetricsUI(0, 0);
         window.WebRTCUtils.showToast('Metrics reset successfully.', 'info');
       }
-    } catch (err) {
-      console.error('Failed to reset metrics:', err);
+    } catch {
+      // Ignore reset failure
     }
   }
 
@@ -658,8 +703,7 @@ class DesktopApp {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       this.saveJsonFile(data, `metrics-${Date.now()}.json`);
-    } catch (err) {
-      console.error('Failed to export metrics:', err);
+    } catch {
       window.WebRTCUtils.showToast('Failed to export metrics.', 'error');
     }
   }
@@ -677,7 +721,7 @@ class DesktopApp {
   // ── 11. Cleanup Lifecycle ─────────────────────────────────────────
   dispose() {
     if (this.rAfHandle) cancelAnimationFrame(this.rAfHandle);
-    if (this.desktopDetectionLoop) clearInterval(this.desktopDetectionLoop);
+    this.stopDesktopDetection();
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.detector) this.detector.dispose();
     if (this.negotiator) this.negotiator.dispose();

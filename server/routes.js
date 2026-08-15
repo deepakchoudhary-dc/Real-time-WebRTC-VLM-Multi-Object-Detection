@@ -12,7 +12,7 @@ const { httpRateLimiter } = require('./rate-limiter');
 const { getPrimaryLANIP } = require('./tls');
 
 function attachRoutes(app) {
-  // ── 1. QR Code & Room Initialization (N05) ────────────────────────
+  // ── 1. QR Code & Room Initialization (N05, R15) ───────────────────
   app.get('/api/qr', httpRateLimiter, async (req, res) => {
     try {
       const validHost = getValidHost(req);
@@ -29,7 +29,8 @@ function attachRoutes(app) {
       }
 
       const room = roomStore.createRoom();
-      const phoneUrl = `${baseUrl}/phone?room=${encodeURIComponent(room.code)}&token=${encodeURIComponent(room.phoneToken)}`;
+      const detectParam = req.query.detect === 'desktop' ? '&detect=desktop' : '';
+      const phoneUrl = `${baseUrl}/phone?room=${encodeURIComponent(room.code)}&token=${encodeURIComponent(room.phoneToken)}${detectParam}`;
 
       const qrCode = await QRCode.toDataURL(phoneUrl, {
         width: 256,
@@ -91,7 +92,7 @@ function attachRoutes(app) {
     res.json({ iceServers });
   });
 
-  // ── 3. Performance Metrics (Sanitized, no connection count leak) ───
+  // ── 3. Performance Metrics (Real Live E2E Latency, R02) ───────────
   app.get('/api/metrics', httpRateLimiter, (req, res) => {
     const snapshot = metricsStore.getSnapshot();
     res.json(snapshot);

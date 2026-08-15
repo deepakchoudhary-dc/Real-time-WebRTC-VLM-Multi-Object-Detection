@@ -27,7 +27,7 @@ class PhoneCameraApp {
     this.facingMode = 'environment'; // Default back camera
     this.isHD = false;
 
-    // Detection mode: if detect=desktop is set, mobile skips local AI inference (N21)
+    // Detection mode: if detect=desktop is set, mobile skips local AI inference (N21, R15)
     const urlParams = new URLSearchParams(window.location.search);
     this.disablePhoneInference = urlParams.get('detect') === 'desktop';
 
@@ -76,12 +76,23 @@ class PhoneCameraApp {
     document.getElementById('flipBtn')?.addEventListener('click', () => this.toggleCamera());
     document.getElementById('qualityBtn')?.addEventListener('click', () => this.toggleQuality());
 
-    // Lifecycle cleanups & bfcache restoration (N24, N25)
+    // Lifecycle cleanups & bfcache restoration (R04, N24, N25)
     window.addEventListener('pagehide', () => this.dispose());
     window.addEventListener('pageshow', (event) => {
-      if (event.persisted && !this.localStream) {
-        console.log('Restored from bfcache, re-initializing camera...');
-        this.startCamera();
+      if (event.persisted) {
+        if (!this.socket.connected) {
+          this.socket.connect();
+        }
+        if (this.roomCode && this.phoneToken) {
+          this.socket.emit('join-room', {
+            roomCode: this.roomCode,
+            role: 'phone',
+            token: this.phoneToken
+          });
+        }
+        if (!this.localStream) {
+          this.startCamera();
+        }
       }
     });
 
@@ -124,11 +135,11 @@ class PhoneCameraApp {
   async initDetector() {
     const loaded = await this.detector.loadModel();
     if (!loaded) {
-      console.warn('Failed to load on-device detector.');
+      this.showError('Warning: Local AI detector failed to load. Streaming raw camera video.');
     }
   }
 
-  // ── 5. WebRTC Setup ───────────────────────────────────────────────
+  // ── 5. WebRTC Setup (R03 Single Owner) ────────────────────────────
   async initWebRTC() {
     const iceConfig = await window.WebRTCUtils.fetchIceConfig();
     this.peerConnection = new RTCPeerConnection(iceConfig);
@@ -137,7 +148,10 @@ class PhoneCameraApp {
     this.negotiator = new window.WebRTCUtils.PerfectNegotiator(
       this.peerConnection,
       this.socket,
-      { isPolite: false }
+      {
+        isPolite: false,
+        onStateChange: (state) => this.updateStatusBadge(state) // Single owner (R03)
+      }
     );
 
     // Attach local media tracks
@@ -146,18 +160,11 @@ class PhoneCameraApp {
         this.peerConnection.addTrack(track, this.localStream);
       });
     }
-
-    this.peerConnection.onconnectionstatechange = () => {
-      const state = this.peerConnection.connectionState;
-      console.log(`PeerConnection state: ${state}`);
-      this.updateStatusBadge(state);
-    };
   }
 
   // ── 6. Socket Events & Room Join (N05) ────────────────────────────
   setupSocketEvents() {
     this.socket.on('connect', () => {
-      console.log('Socket connected:', this.socket.id);
       if (this.roomCode && this.phoneToken) {
         this.socket.emit('join-room', {
           roomCode: this.roomCode,
@@ -167,34 +174,28 @@ class PhoneCameraApp {
       }
     });
 
-    this.socket.on('connect_error', (err) => {
-      console.warn('Socket connect error:', err);
+    this.socket.on('connect_error', () => {
       this.updateStatusBadge('disconnected');
     });
 
     this.socket.on('room-joined', (data) => {
-      console.log('Successfully joined room:', data);
       this.updateStatusBadge(data.hasPeer ? 'connected' : 'connecting');
     });
 
     this.socket.on('peer-joined', () => {
-      console.log('🖥️ Desktop peer joined room');
       this.updateStatusBadge('connected');
     });
 
     this.socket.on('peer-left', () => {
-      console.log('🖥️ Desktop peer left');
       this.updateStatusBadge('disconnected');
     });
 
     this.socket.on('room-closed', (data) => {
-      console.warn('Room closed:', data?.reason);
-      this.showError('Session expired. Please scan a fresh QR code from the desktop.');
+      this.showError(data?.reason || 'Session expired. Please scan a fresh QR code from the desktop.');
       this.dispose();
     });
 
     this.socket.on('error-message', (err) => {
-      console.error('Room join rejected:', err);
       this.showError(err.error || err.message || 'Access denied.');
     });
   }
@@ -231,7 +232,6 @@ class PhoneCameraApp {
 
       this.startMetricsLoop();
     } catch (err) {
-      console.error('Camera access failed:', err);
       this.showError(this.formatCameraError(err));
       if (startBtn) startBtn.disabled = false;
     }
@@ -269,8 +269,9 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 8. Flip Camera & Quality Switch ───────────────────────────────
+  // ── 8. Flip Camera & Quality Switch (R15 Error Recovery) ─────────
   async toggleCamera() {
+    const prevMode = this.facingMode;
     this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
 
     const videoEl = document.getElementById('localVideo');
@@ -280,6 +281,11 @@ class PhoneCameraApp {
       } else {
         videoEl.classList.remove('mirrored');
       }
+    }
+
+    const flipBtn = document.getElementById('flipBtn');
+    if (flipBtn) {
+      flipBtn.setAttribute('aria-pressed', this.facingMode === 'user' ? 'true' : 'false');
     }
 
     if (!this.localStream) return;
@@ -302,7 +308,8 @@ class PhoneCameraApp {
         await sender.replaceTrack(newVideoTrack);
       }
     } catch (err) {
-      console.error('Failed to toggle camera:', err);
+      this.facingMode = prevMode;
+      this.showError(`Failed to switch camera: ${err.message || 'Camera busy.'}`);
     }
   }
 
@@ -322,8 +329,8 @@ class PhoneCameraApp {
           width: { ideal: this.isHD ? 1280 : 640 },
           height: { ideal: this.isHD ? 720 : 480 }
         });
-      } catch (err) {
-        console.warn('applyConstraints failed, renegotiating:', err);
+      } catch {
+        // Constraints fallback
       }
     }
   }
@@ -358,8 +365,8 @@ class PhoneCameraApp {
             detections
           });
         }
-      } catch (err) {
-        console.error('Detection frame error:', err);
+      } catch {
+        // Frame detection error
       } finally {
         this.isDetecting = false;
       }
@@ -423,7 +430,7 @@ class PhoneCameraApp {
     });
   }
 
-  // ── 10. Metrics HUD Loop (N24) ────────────────────────────────────
+  // ── 10. Metrics HUD Loop (R15 Accuracy in Desktop Mode) ───────────
   startMetricsLoop() {
     if (this.metricsTimer) clearInterval(this.metricsTimer);
 
@@ -438,9 +445,15 @@ class PhoneCameraApp {
         const latEl = document.getElementById('latencyDisplay');
         const objEl = document.getElementById('objectsDisplay');
 
-        if (fpsEl) fpsEl.textContent = `${this.currentFps} fps`;
-        if (latEl) latEl.textContent = `${this.lastLatency}ms`;
-        if (objEl) objEl.textContent = this.activeObjects;
+        if (this.disablePhoneInference) {
+          if (fpsEl) fpsEl.textContent = 'Desktop AI';
+          if (latEl) latEl.textContent = 'Offloaded';
+          if (objEl) objEl.textContent = '—';
+        } else {
+          if (fpsEl) fpsEl.textContent = `${this.currentFps} fps`;
+          if (latEl) latEl.textContent = `${this.lastLatency}ms`;
+          if (objEl) objEl.textContent = this.activeObjects;
+        }
       }
     }, 500);
   }

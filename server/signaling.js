@@ -5,8 +5,23 @@ const { roomStore } = require('./room-store');
 const { metricsStore } = require('./metrics');
 const { SocketRateLimiter } = require('./rate-limiter');
 
+// COCO-80 label set allowlist for strict input sanitation (R01)
+const COCO_LABELS = new Set([
+  'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+  'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
+  'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+  'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+  'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+  'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+  'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+  'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+  'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
+  'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
+  'toothbrush'
+]);
+
 /**
- * Sanitize and validate detection result payload
+ * Sanitize and validate detection result payload (R01)
  */
 function validateDetectionResult(payload) {
   if (!payload || typeof payload !== 'object') return null;
@@ -32,14 +47,17 @@ function validateDetectionResult(payload) {
       typeof d.ymax === 'number' &&
       Number.isFinite(d.ymax)
     ) {
-      validDetections.push({
-        label: d.label,
-        score: Math.round(d.score * 1000) / 1000,
-        xmin: Math.max(0, Math.min(1, d.xmin)),
-        ymin: Math.max(0, Math.min(1, d.ymin)),
-        xmax: Math.max(0, Math.min(1, d.xmax)),
-        ymax: Math.max(0, Math.min(1, d.ymax))
-      });
+      const sanitizedLabel = d.label.replace(/[^a-zA-Z0-9 _-]/g, '').trim().substring(0, 32);
+      if (sanitizedLabel) {
+        validDetections.push({
+          label: sanitizedLabel,
+          score: Math.round(d.score * 1000) / 1000,
+          xmin: Math.max(0, Math.min(1, d.xmin)),
+          ymin: Math.max(0, Math.min(1, d.ymin)),
+          xmax: Math.max(0, Math.min(1, d.xmax)),
+          ymax: Math.max(0, Math.min(1, d.ymax))
+        });
+      }
     }
   }
 
@@ -110,7 +128,7 @@ function attachSignaling(io) {
       next();
     });
 
-    // ── 1. Room Joining (N05, N09) ───────────────────────────────────
+    // ── 1. Room Joining (N05, N09, R07) ──────────────────────────────
     socket.on('join-room', (payload, callback) => {
       if (!payload || typeof payload !== 'object') {
         const err = { error: 'Invalid join-room payload.' };
@@ -130,8 +148,13 @@ function attachSignaling(io) {
         return;
       }
 
-      const { room, peerSocketId, bufferedOffer } = result;
+      const { room, peerSocketId, bufferedOffer, previousLeave } = result;
       logger.info(`Peer joined room: ${logger.maskCode(room.code)} as ${role} (id: ${socket.id})`);
+
+      // If this socket was previously in another room, notify the previous peer (R07)
+      if (previousLeave && previousLeave.otherPeerId) {
+        io.to(previousLeave.otherPeerId).emit('peer-left', { role: previousLeave.role });
+      }
 
       const ackData = {
         success: true,
@@ -166,7 +189,10 @@ function attachSignaling(io) {
       roomStore.touchRoom(roomInfo.meta.roomCode);
       const peerSocketId = roomStore.getPeerSocketId(socket.id);
 
-      if (peerSocketId) {
+      const socketsMap = io.sockets?.sockets || io.sockets;
+      const isPeerAlive = socketsMap ? (socketsMap.has ? socketsMap.has(peerSocketId) : !!socketsMap.get?.(peerSocketId)) : !!peerSocketId;
+
+      if (peerSocketId && isPeerAlive) {
         // Point-to-peer relay directly to the peer's socket
         io.to(peerSocketId).emit('offer', validSdp);
       } else {
@@ -224,12 +250,23 @@ function attachSignaling(io) {
       if (peerSocketId) {
         // Count frame ONLY if successfully relayed to peer (N15)
         metricsStore.incrementProcessedFrames();
-        metricsStore.incrementTotalFrames();
         io.to(peerSocketId).emit('detection-result', validResult);
       }
     });
 
-    // ── 6. Disconnect Handling ───────────────────────────────────────
+    // ── 6. Metrics Reporting from Client (Desktop -> Server, R02) ────
+    socket.on('metrics-report', (report) => {
+      const roomInfo = roomStore.getRoomBySocketId(socket.id);
+      if (!roomInfo || roomInfo.meta.role !== 'desktop') {
+        return; // Only desktop reports canonical E2E latency measurements
+      }
+
+      if (report && typeof report.latency === 'number' && Number.isFinite(report.latency)) {
+        metricsStore.recordLatency(report.latency);
+      }
+    });
+
+    // ── 7. Disconnect Handling ───────────────────────────────────────
     socket.on('disconnect', (reason) => {
       logger.debug(`Socket disconnected: ${socket.id} (${reason})`);
       const leaveResult = roomStore.leaveRoom(socket.id);
@@ -245,5 +282,6 @@ module.exports = {
   attachSignaling,
   validateDetectionResult,
   validateSdp,
-  validateIceCandidate
+  validateIceCandidate,
+  COCO_LABELS
 };

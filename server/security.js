@@ -1,35 +1,47 @@
 'use strict';
 
-const config = require('./config');
+const net = require('net');
 const crypto = require('crypto');
-
-// Standard LAN IP pattern
-const LAN_ORIGIN_REGEX = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
+const config = require('./config');
 
 /**
- * Validate incoming request origin (used by CORS and Socket.IO handshake)
+ * Constant-time comparison for tokens and hashes (R10, R11)
  */
-function isOriginAllowed(origin) {
-  // Allow requests without Origin header (e.g. same-origin GET/POST, mobile webview, curl)
-  if (!origin) return true;
+function safeCompareTokens(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
-  // Check LAN regex
-  if (LAN_ORIGIN_REGEX.test(origin)) return true;
+/**
+ * Check if an IP address is in a private/local range (R14)
+ */
+function isPrivateIP(ip) {
+  if (!ip) return false;
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') return true;
 
-  // Check explicit public URL
-  if (config.PUBLIC_URL && origin.toLowerCase() === config.PUBLIC_URL.toLowerCase()) {
-    return true;
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map((p) => parseInt(p, 10));
+    if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) {
+      return false;
+    }
+    // 10.0.0.0/8
+    if (parts[0] === 10) return true;
+    // 172.16.0.0/12
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    // 192.168.0.0/16
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    // 127.0.0.0/8 (Loopback)
+    if (parts[0] === 127) return true;
   }
 
-  // Check host whitelist
-  if (config.HOST_WHITELIST) {
-    try {
-      const parsed = new URL(origin);
-      if (config.HOST_WHITELIST.includes(parsed.hostname.toLowerCase())) {
-        return true;
-      }
-    } catch {
-      return false;
+  if (net.isIPv6(ip)) {
+    const normalized = ip.toLowerCase();
+    // ::1 loopback or fe80::/10 link-local or fc00::/7 unique local
+    if (normalized === '::1' || normalized.startsWith('fe80:') || normalized.startsWith('fc') || normalized.startsWith('fd')) {
+      return true;
     }
   }
 
@@ -37,18 +49,59 @@ function isOriginAllowed(origin) {
 }
 
 /**
- * Validate and sanitize host header (prevent host-header injection / cache poisoning)
+ * Validate incoming request origin (used by CORS and Socket.IO handshake)
+ */
+function isOriginAllowed(origin) {
+  if (!origin) return true;
+
+  try {
+    const parsed = new URL(origin);
+    const hostname = parsed.hostname.toLowerCase();
+
+    if (hostname === 'localhost' || isPrivateIP(hostname)) {
+      return true;
+    }
+
+    if (config.PUBLIC_URL) {
+      const publicParsed = new URL(config.PUBLIC_URL);
+      if (hostname === publicParsed.hostname.toLowerCase()) {
+        return true;
+      }
+    }
+
+    if (config.HOST_WHITELIST && config.HOST_WHITELIST.includes(hostname)) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Validate and sanitize host header (IPv4 and IPv6 safe, R14)
  */
 function getValidHost(req) {
   const rawHost = req.get('host') || req.headers.host || '';
   if (!rawHost || rawHost.length > 100) return null;
 
-  // Strip port to check hostname
-  const hostname = rawHost.split(':')[0].toLowerCase();
+  let hostname = rawHost;
+  // Handle IPv6 bracket format e.g. [::1]:3443
+  if (rawHost.startsWith('[')) {
+    const closeBracket = rawHost.indexOf(']');
+    if (closeBracket !== -1) {
+      hostname = rawHost.slice(1, closeBracket);
+    }
+  } else if (rawHost.includes(':')) {
+    hostname = rawHost.split(':')[0];
+  }
 
-  // Allow localhost & LAN IP ranges
-  const isLanHost = /^(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/.test(hostname);
-  if (isLanHost) return rawHost;
+  hostname = hostname.toLowerCase();
+
+  if (hostname === 'localhost' || isPrivateIP(hostname)) {
+    return rawHost;
+  }
 
   if (config.HOST_WHITELIST && config.HOST_WHITELIST.includes(hostname)) {
     return rawHost;
@@ -58,7 +111,7 @@ function getValidHost(req) {
 }
 
 /**
- * Security headers middleware (N22 strict CSP)
+ * Security headers middleware
  */
 function securityHeaders(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -70,7 +123,7 @@ function securityHeaders(req, res, next) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
 
-  // Strict Content Security Policy
+  // Content Security Policy
   res.setHeader(
     'Content-Security-Policy',
     [
@@ -137,6 +190,7 @@ if (csrfCleanupTimer.unref) {
 }
 
 module.exports = {
+  safeCompareTokens,
   isOriginAllowed,
   getValidHost,
   securityHeaders,

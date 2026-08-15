@@ -63,7 +63,7 @@ class IceCandidateQueue {
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
       } catch (err) {
-        console.warn('Failed to add immediate ICE candidate:', err);
+        // Candidate discarded if invalid
       }
     } else {
       this.queue.push(candidateInit);
@@ -77,7 +77,7 @@ class IceCandidateQueue {
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
       } catch (err) {
-        console.warn('Failed to add queued ICE candidate:', err);
+        // Discard failed queued candidates
       }
     }
   }
@@ -89,13 +89,14 @@ class IceCandidateQueue {
 }
 
 /**
- * MDN Perfect Negotiation Coordinator with Offer Retry & ICE Restart (N18, N19)
+ * MDN Perfect Negotiation Coordinator with Offer Retry & Single-Owner ICE Restart (R03, N18, N19)
  */
 class PerfectNegotiator {
   constructor(peerConnection, socket, options = {}) {
     this.pc = peerConnection;
     this.socket = socket;
     this.isPolite = !!options.isPolite; // Desktop = polite (true), Phone = impolite (false)
+    this.onStateChange = typeof options.onStateChange === 'function' ? options.onStateChange : null;
     this.makingOffer = false;
     this.ignoreOffer = false;
     this.isSettingRemoteAnswerPending = false;
@@ -122,11 +123,14 @@ class PerfectNegotiator {
       }
     };
 
-    // 3. Connection State Change & ICE Restart Recovery (N19)
+    // 3. Single-Owner Connection State Change & Automatic ICE Restart Recovery (R03, N19)
     this.pc.onconnectionstatechange = async () => {
       const state = this.pc.connectionState;
+      if (this.onStateChange) {
+        this.onStateChange(state);
+      }
+
       if (state === 'failed') {
-        console.warn('WebRTC connection failed. Initiating ICE restart...');
         try {
           if (this.pc.restartIce) {
             this.pc.restartIce();
@@ -134,7 +138,7 @@ class PerfectNegotiator {
             await this.sendOffer({ iceRestart: true });
           }
         } catch (err) {
-          console.error('Failed to restart ICE:', err);
+          // Restart failed
         }
       }
     };
@@ -149,7 +153,6 @@ class PerfectNegotiator {
 
         this.ignoreOffer = !this.isPolite && offerCollision;
         if (this.ignoreOffer) {
-          console.warn('Impolite peer ignored colliding offer');
           return;
         }
 
@@ -166,7 +169,7 @@ class PerfectNegotiator {
           this.socket.emit('answer', this.pc.localDescription);
         }
       } catch (err) {
-        console.error('Error handling incoming offer:', err);
+        // Error handling incoming offer
       }
     });
 
@@ -180,7 +183,6 @@ class PerfectNegotiator {
         await this.candidateQueue.flush();
       } catch (err) {
         this.isSettingRemoteAnswerPending = false;
-        console.error('Error handling incoming answer:', err);
       }
     });
 
@@ -201,7 +203,7 @@ class PerfectNegotiator {
       // Start offer retry timer with backoff (N18)
       this.scheduleOfferRetry();
     } catch (err) {
-      console.error('Error creating offer:', err);
+      // Offer creation error
     } finally {
       this.makingOffer = false;
     }
@@ -214,7 +216,6 @@ class PerfectNegotiator {
     const delayMs = Math.min(10000, 2000 * Math.pow(1.5, this.offerRetryCount));
     this.offerRetryTimer = setTimeout(async () => {
       if (this.pc.signalingState === 'have-local-offer') {
-        console.log(`Retrying unacknowledged offer (attempt ${this.offerRetryCount + 1})...`);
         this.offerRetryCount++;
         this.socket.emit('offer', this.pc.localDescription);
         this.scheduleOfferRetry();
@@ -247,8 +248,8 @@ async function fetchIceConfig() {
     if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
       return { iceServers: data.iceServers };
     }
-  } catch (err) {
-    console.warn('Failed to fetch /api/ice-config, falling back to public STUN:', err);
+  } catch {
+    // Fallback to default STUN
   }
 
   return {

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { RoomStore } = require('../../server/room-store');
 
 test('RoomStore - Room creation and token allocation', () => {
-  const store = new RoomStore({ maxRooms: 10, roomTtlMs: 10000, gcIntervalMs: 60000 });
+  const store = new RoomStore({ maxRooms: 10, roomTtlMs: 10000 });
 
   const code1 = store.generateRoomCode(6);
   assert.equal(code1.length, 6);
@@ -23,17 +23,17 @@ test('RoomStore - Room creation and token allocation', () => {
   store.dispose();
 });
 
-test('RoomStore - Desktop & Phone Token Authentication (N05 Regression)', () => {
-  const store = new RoomStore({ maxRooms: 10, gcIntervalMs: 60000 });
+test('RoomStore - Constant-Time Token Authentication (N05, R10, R11)', () => {
+  const store = new RoomStore({ maxRooms: 10 });
   const room = store.createRoom();
 
-  // 1. Desktop joins without token -> Rejected (N05 fix)
+  // 1. Desktop joins without token -> Rejected
   const joinDesktopNoToken = store.joinRoom(room.code, 'desktop', 'socket_d1', null);
   assert.equal(joinDesktopNoToken.success, false);
   assert.match(joinDesktopNoToken.error, /token required/i);
 
-  // 2. Desktop joins with wrong token -> Rejected
-  const joinDesktopBadToken = store.joinRoom(room.code, 'desktop', 'socket_d1', 'invalid-token');
+  // 2. Desktop joins with invalid token -> Rejected
+  const joinDesktopBadToken = store.joinRoom(room.code, 'desktop', 'socket_d1', 'invalid-token-1234');
   assert.equal(joinDesktopBadToken.success, false);
   assert.match(joinDesktopBadToken.error, /Invalid desktop authentication token/i);
 
@@ -61,7 +61,7 @@ test('RoomStore - Desktop & Phone Token Authentication (N05 Regression)', () => 
 });
 
 test('RoomStore - Reconnection Slot Reclaim (N09)', () => {
-  const store = new RoomStore({ maxRooms: 10, gcIntervalMs: 60000 });
+  const store = new RoomStore({ maxRooms: 10 });
   const room = store.createRoom();
 
   store.joinRoom(room.code, 'desktop', 'socket_d1', room.desktopToken);
@@ -79,9 +79,26 @@ test('RoomStore - Reconnection Slot Reclaim (N09)', () => {
   store.dispose();
 });
 
-test('RoomStore - Liveness-based GC preserves active streaming rooms (N08)', () => {
-  // Set long gcIntervalMs so background timer does not race manual sweep in test
-  const store = new RoomStore({ roomTtlMs: 60, gcIntervalMs: 60000 });
+test('RoomStore - Room-switch leaves previous room and notifies peer (R07)', () => {
+  const store = new RoomStore({ maxRooms: 10 });
+  const room1 = store.createRoom();
+  const room2 = store.createRoom();
+
+  store.joinRoom(room1.code, 'desktop', 'socket_d1', room1.desktopToken);
+  store.joinRoom(room1.code, 'phone', 'socket_p1', room1.phoneToken);
+
+  // Desktop switches to room2
+  const switchResult = store.joinRoom(room2.code, 'desktop', 'socket_d1', room2.desktopToken);
+  assert.equal(switchResult.success, true);
+  assert.ok(switchResult.previousLeave);
+  assert.equal(switchResult.previousLeave.otherPeerId, 'socket_p1');
+  assert.equal(switchResult.previousLeave.role, 'desktop');
+
+  store.dispose();
+});
+
+test('RoomStore - Liveness-based GC preserves active streaming rooms (N08, N43)', () => {
+  const store = new RoomStore({ roomTtlMs: 60, abandonmentTtlMs: 50 });
   const room = store.createRoom();
 
   store.joinRoom(room.code, 'desktop', 'sock_d', room.desktopToken);
@@ -95,7 +112,6 @@ test('RoomStore - Liveness-based GC preserves active streaming rooms (N08)', () 
 
     setTimeout(() => {
       store.sweep();
-      // Room should STILL be alive because updatedAt was touched
       assert.ok(store.getRoom(room.code));
       clearInterval(keepAliveInterval);
 

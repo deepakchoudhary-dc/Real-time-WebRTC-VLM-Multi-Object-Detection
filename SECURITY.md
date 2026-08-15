@@ -1,36 +1,31 @@
-# 🔒 Security Policy & Threat Model
+# 🔒 Security Threat Model & Defense Mechanisms
 
-## Threat Model & Security Guarantees
-
-This project implements a defense-in-depth security model tailored for real-time video streaming across local and wireless networks.
-
-### 1. Room Authentication & Token Binding (F-01, F-02, F-11)
-- **Room Codes:** Generated using `crypto.randomInt` from an unambiguous 30-character alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`), providing 729+ million combinations for 6-character codes.
-- **Room Tokens:** A 128-bit cryptographic token (`crypto.randomBytes(16)`) is generated per room.
-- **Role Enforcement:** Joining as a `phone` requires presenting the exact room token. Unauthenticated strangers cannot guess room codes or inject themselves into existing rooms to intercept streams.
-- **Slot Isolation:** Each room strictly allows one `desktop` socket and one `phone` socket. Attempts by 3rd parties to occupy an active slot are rejected.
-
-### 2. Point-to-Peer Signaling Isolation (F-04, F4)
-- WebRTC SDP offers/answers and ICE candidates are routed exclusively to the designated peer's socket ID (`io.to(peerSocketId)`), completely eliminating broadcast leaks across room participants.
-
-### 3. Subject Alternative Name (SAN) Dynamic TLS (F-15)
-- In-memory dynamic self-signed certificates include SAN extensions for `localhost`, `127.0.0.1`, and all detected LAN IPv4 addresses.
-- Private keys exist solely in volatile process memory and are never persisted to disk or git history.
-
-### 4. Injection & Poisoning Prevention (F-06, F-16)
-- The host header in `/api/qr` and HTTP redirection is validated against allowed hostname patterns, preventing cache poisoning and host-header injection.
-
-### 5. CSRF Protection (F-05)
-- Destructive and administrative endpoints like `/api/reset-metrics` require an `X-CSRF-Token` header validated using constant-time string comparison (`crypto.timingSafeEqual`).
-
-### 6. Event Rate Limiting & Resource Caps (F-03, F-09, F-17)
-- **HTTP Limiter:** Capped per IP address (120 requests / minute).
-- **Socket Token Bucket:** Capped per connection (60 events / second) to prevent signaling flood attacks and CPU exhaustion.
-- **Room TTL & Garbage Collection:** Rooms expire after 30 minutes; an automatic sweep cleans abandoned rooms every 5 minutes.
-- **Metrics Ring Buffer:** Fixed at 1,000 samples with strict `Number.isFinite()` guards preventing `NaN` or `null` metric corruptions.
+This document outlines the security architecture, threat model, and defense implementations of the WebRTC vision platform.
 
 ---
 
-## Reporting a Vulnerability
+## 1. Threat Model & Mitigation Matrix
 
-If you discover a security vulnerability, please open a private GitHub security advisory or report it directly to the repository maintainers.
+| Threat / Attack Vector | Risk Level | Defensive Mitigation | Implementation Reference |
+| :--- | :---: | :--- | :--- |
+| **Stream Interception / Hijacking** | **CRITICAL** | Separate 128-bit `desktopToken` and `phoneToken` generated per session via `crypto.randomBytes`. Tokens are verified using `crypto.timingSafeEqual`. Both peers must present valid tokens to join. | [room-store.js](file:///e:/ADBrand2/server/room-store.js#L110) |
+| **Room Code Brute-Forcing** | **HIGH** | CSPRNG 6-character room codes (`crypto.randomInt` over 30-char unambiguous alphabet). IP-level rate limiting (120 req/min) on `/api/*`. | [room-store.js](file:///e:/ADBrand2/server/room-store.js#L26), [rate-limiter.js](file:///e:/ADBrand2/server/rate-limiter.js#L8) |
+| **Signaling Eavesdropping** | **HIGH** | Signaling is relayed strictly point-to-peer (`io.to(peerSocketId)`). No room broadcast channels exist. | [signaling.js](file:///e:/ADBrand2/server/signaling.js#L149) |
+| **Video Data Leakage** | **CRITICAL** | Raw video travels directly peer-to-peer over DTLS-SRTP encrypted WebRTC. The server never handles or stores raw media frames. Audio is disabled. | [phone.js](file:///e:/ADBrand2/frontend/js/phone.js#L182) |
+| **Stored XSS via Detection Feed** | **MEDIUM** | Detection labels are validated against an allowlist and rendered exclusively via safe `textContent` DOM nodes (no `innerHTML` with remote data). | [signaling.js](file:///e:/ADBrand2/server/signaling.js#L10), [app.js](file:///e:/ADBrand2/frontend/js/app.js#L420) |
+| **CSRF Tampering** | **MEDIUM** | Administrative actions (`POST /api/reset-metrics`) require a single-use per-session CSRF token passed via `X-CSRF-Token` headers. | [security.js](file:///e:/ADBrand2/server/security.js#L80) |
+| **Host Header Injection** | **MEDIUM** | Host headers in QR generation and HTTP redirection are validated against `net.isIP` private ranges and local hostnames before URL construction. | [security.js](file:///e:/ADBrand2/server/security.js#L40) |
+| **Socket Flood / DoS** | **HIGH** | Per-socket sliding window token bucket rate limiter (60 events/sec) with automatic `error-message` event notifications. | [rate-limiter.js](file:///e:/ADBrand2/server/rate-limiter.js#L46), [signaling.js](file:///e:/ADBrand2/server/signaling.js#L112) |
+| **Resource Exhaustion** | **MEDIUM** | Bounded in-memory structures: `MAX_ROOMS` cap, `ROOM_TTL_MS` (30 min) liveness sweep, `MAX_CONNECTIONS` connection cap, ring buffer for latency samples. | [room-store.js](file:///e:/ADBrand2/server/room-store.js#L42), [metrics.js](file:///e:/ADBrand2/server/metrics.js#L10) |
+| **Log Leakage** | **LOW** | Structured logging redacts all tokens, secrets, credentials, and masks room codes in log outputs. | [logger.js](file:///e:/ADBrand2/server/logger.js#L18) |
+
+---
+
+## 2. Content Security Policy (CSP)
+
+The server enforces strict HTTP security headers:
+- `Content-Security-Policy`: `default-src 'self' ... object-src 'none'; frame-ancestors 'none';`
+- `X-Content-Type-Options`: `nosniff`
+- `X-Frame-Options`: `DENY`
+- `X-XSS-Protection`: `1; mode=block`
+- `Strict-Transport-Security`: `max-age=31536000; includeSubDomains` (when served over TLS)

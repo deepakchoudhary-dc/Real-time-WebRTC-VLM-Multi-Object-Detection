@@ -36,9 +36,10 @@ function startServer() {
     pingInterval: 10_000
   });
 
-  // Enforce MAX_CONNECTIONS cap (N07)
+  // Enforce MAX_CONNECTIONS cap across ALL connected sockets (idle + joined, R05)
   io.use((socket, next) => {
-    if (roomStore.activeConnectionsCount >= config.MAX_CONNECTIONS) {
+    const totalClients = io.engine ? io.engine.clientsCount : roomStore.activeConnectionsCount;
+    if (totalClients > config.MAX_CONNECTIONS) {
       logger.warn(`Rejected connection: MAX_CONNECTIONS (${config.MAX_CONNECTIONS}) reached.`);
       return next(new Error('Server full. Maximum connections reached.'));
     }
@@ -48,8 +49,8 @@ function startServer() {
   // Attach WebRTC Signaling handlers
   attachSignaling(io);
 
-  // Periodic GC listener to disconnect expired clients (N08)
-  setInterval(() => {
+  // Single Owner GC timer (R06, N08)
+  const gcTimer = setInterval(() => {
     roomStore.sweep((socketId, roomCode) => {
       const socket = io.sockets.sockets.get(socketId);
       if (socket) {
@@ -57,7 +58,8 @@ function startServer() {
         socket.disconnect(true);
       }
     });
-  }, config.ROOM_GC_INTERVAL_MS).unref();
+  }, config.ROOM_GC_INTERVAL_MS);
+  if (gcTimer.unref) gcTimer.unref();
 
   // Start HTTP Redirect Server
   const redirectServer = createHttpRedirectServer();
@@ -80,7 +82,8 @@ function startServer() {
   function shutdown(signal) {
     logger.info(`${signal} received. Commencing graceful shutdown...`);
 
-    // Disconnect all active sockets
+    clearInterval(gcTimer);
+
     io.close(() => {
       logger.info('Socket.IO connections closed.');
     });
@@ -109,7 +112,7 @@ function startServer() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  return { httpsServer, redirectServer, io, app };
+  return { httpsServer, redirectServer, io, app, gcTimer };
 }
 
 if (require.main === module) {

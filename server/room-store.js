@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const config = require('./config');
 const logger = require('./logger');
+const { safeCompareTokens } = require('./security');
 
 const SAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 30 chars, no ambiguous 0/O, 1/I
 
@@ -10,16 +11,12 @@ class RoomStore {
   constructor(options = {}) {
     this.maxRooms = options.maxRooms || config.MAX_ROOMS;
     this.roomTtlMs = options.roomTtlMs || config.ROOM_TTL_MS;
-    this.gcIntervalMs = options.gcIntervalMs || config.ROOM_GC_INTERVAL_MS;
+    this.abandonmentTtlMs = options.abandonmentTtlMs || config.ROOM_ABANDONMENT_TTL_MS;
 
     // roomCode -> RoomObject
     this.rooms = new Map();
     // socketId -> { roomCode, role }
     this.socketMap = new Map();
-
-    // Start GC timer
-    this.gcTimer = setInterval(() => this.sweep(), this.gcIntervalMs);
-    if (this.gcTimer.unref) this.gcTimer.unref();
   }
 
   generateRoomCode(length = 6) {
@@ -98,7 +95,7 @@ class RoomStore {
   }
 
   /**
-   * Join a room with full token authentication for BOTH desktop and phone (N05, N06, N09)
+   * Join a room with full constant-time token authentication (R10, R11, N05, N09)
    */
   joinRoom(roomCode, role, socketId, token) {
     if (!roomCode || typeof roomCode !== 'string') {
@@ -119,27 +116,25 @@ class RoomStore {
       return { success: false, error: `${role} authentication token required.` };
     }
 
-    // Authenticate token for role (N05)
+    // Authenticate token using constant-time comparison (R10, R11)
     const expectedToken = role === 'desktop' ? room.desktopToken : room.phoneToken;
-    if (token !== expectedToken) {
+    if (!safeCompareTokens(token, expectedToken)) {
       return { success: false, error: `Invalid ${role} authentication token. Access denied.` };
     }
 
     // Reconnection / Slot Reclaim support (N09)
     const currentOccupant = room[role];
     if (currentOccupant && currentOccupant !== socketId) {
-      // Check if previous occupant socket is still valid
+      // Check if previous occupant socket is still actively connected
       const existingMeta = this.socketMap.get(currentOccupant);
       if (existingMeta) {
-        // Slot is currently in active use by another live socket
         return { success: false, error: `Role slot '${role}' is already occupied.` };
       }
-      // Stale slot reclaimed
       logger.info(`Reclaiming stale slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
     }
 
-    // Leave any previously joined room
-    this.leaveRoom(socketId);
+    // Leave any previously joined room (and return result for peer-left notification, R07)
+    const previousLeave = this.leaveRoom(socketId);
 
     // Assign slot
     room[role] = socketId;
@@ -150,14 +145,15 @@ class RoomStore {
     let bufferedOffer = null;
     if (room.pendingOffer && room.pendingOffer.fromRole !== role) {
       bufferedOffer = room.pendingOffer.offer;
-      room.pendingOffer = null; // Consume buffered offer
+      room.pendingOffer = null;
     }
 
     return {
       success: true,
       room,
       peerSocketId: role === 'desktop' ? room.phone : room.desktop,
-      bufferedOffer
+      bufferedOffer,
+      previousLeave
     };
   }
 
@@ -175,12 +171,6 @@ class RoomStore {
     };
     room.updatedAt = Date.now();
     return true;
-  }
-
-  clearPendingOffer(roomCode) {
-    const room = this.getRoom(roomCode);
-    if (!room) return;
-    room.pendingOffer = null;
   }
 
   getPeerSocketId(socketId) {
@@ -207,14 +197,14 @@ class RoomStore {
       room.updatedAt = Date.now();
 
       const otherPeerId = role === 'desktop' ? room.phone : room.desktop;
-      return { roomCode, role, otherPeerId, roomEmpty: !room.desktop && !room.phone };
+      return { roomCode, role, otherPeerId };
     }
 
-    return { roomCode, role, otherPeerId: null, roomEmpty: true };
+    return { roomCode, role, otherPeerId: null };
   }
 
   /**
-   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08)
+   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08, N43)
    * @param {function} onRoomSweep - Callback to notify & disconnect active sockets if room expired
    */
   sweep(onRoomSweep) {
@@ -222,9 +212,8 @@ class RoomStore {
     let swept = 0;
 
     for (const [code, room] of this.rooms.entries()) {
-      // Room is expired if inactive for roomTtlMs (liveness-based, N08)
       const isExpired = (now - room.updatedAt > this.roomTtlMs);
-      const isAbandoned = (!room.desktop && !room.phone && (now - room.updatedAt > 5 * 60 * 1000));
+      const isAbandoned = (!room.desktop && !room.phone && (now - room.updatedAt > this.abandonmentTtlMs));
 
       if (isExpired || isAbandoned) {
         if (typeof onRoomSweep === 'function') {
@@ -253,10 +242,8 @@ class RoomStore {
   }
 
   dispose() {
-    if (this.gcTimer) {
-      clearInterval(this.gcTimer);
-      this.gcTimer = null;
-    }
+    this.rooms.clear();
+    this.socketMap.clear();
   }
 }
 
