@@ -36,6 +36,17 @@ function startServer() {
     pingInterval: 10_000
   });
 
+  // Shared sweep notify callback for interval and overflow sweeps (G07)
+  const handleRoomSweep = (socketId, roomCode) => {
+    const socket = io.sockets.sockets.get(socketId);
+    if (socket) {
+      socket.emit('room-closed', { reason: 'Room expired due to inactivity' });
+      socket.disconnect(true);
+    }
+  };
+
+  roomStore.setSweepCallback(handleRoomSweep);
+
   // Enforce MAX_CONNECTIONS cap across ALL connected sockets (idle + joined, R05)
   io.use((socket, next) => {
     const totalClients = io.engine ? io.engine.clientsCount : roomStore.activeConnectionsCount;
@@ -51,13 +62,7 @@ function startServer() {
 
   // Single Owner GC timer (R06, N08)
   const gcTimer = setInterval(() => {
-    roomStore.sweep((socketId, roomCode) => {
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.emit('room-closed', { reason: 'Room expired due to inactivity' });
-        socket.disconnect(true);
-      }
-    });
+    roomStore.sweep(handleRoomSweep);
   }, config.ROOM_GC_INTERVAL_MS);
   if (gcTimer.unref) gcTimer.unref();
 

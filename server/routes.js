@@ -53,21 +53,19 @@ function attachRoutes(app) {
     }
   });
 
-  // ── 2. ICE / STUN / TURN Configuration ───────────────────────────
+  // ── 2. ICE / STUN / TURN Configuration (G11) ──────────────────────
   app.get('/api/ice-config', httpRateLimiter, (req, res) => {
     const iceServers = [];
 
-    // Default STUN servers
+    // Validated STUN servers
     for (const stunUrl of config.STUN_URLS) {
       iceServers.push({ urls: stunUrl });
     }
 
-    // Configured TURN server with optional time-limited HMAC credentials
+    // Configured TURN server with time-limited HMAC credentials (G11)
     if (config.TURN_URL) {
       if (config.TURN_SECRET) {
-        // Coturn REST API ephemeral credential generation (RFC 5766 / Turn REST API)
-        const ttlSeconds = 86400; // 24h
-        const expiry = Math.floor(Date.now() / 1000) + ttlSeconds;
+        const expiry = Math.floor(Date.now() / 1000) + config.TURN_TTL_SECONDS;
         const username = `${expiry}:webrtc-user`;
         const hmac = crypto.createHmac('sha1', config.TURN_SECRET);
         hmac.update(username);
@@ -98,13 +96,16 @@ function attachRoutes(app) {
     res.json(snapshot);
   });
 
-  // ── 4. Reset Metrics (Protected with per-session CSRF token, N12) ──
+  // ── 4. Reset Metrics with Refreshed CSRF Token (G02) ──────────────
   app.post('/api/reset-metrics', httpRateLimiter, (req, res) => {
     if (!verifyAndConsumeCsrfToken(req)) {
       return res.status(403).json({ error: 'Invalid or expired CSRF token.' });
     }
     metricsStore.reset();
-    res.json({ message: 'Metrics successfully reset.' });
+    res.json({
+      message: 'Metrics successfully reset.',
+      csrfToken: issueCsrfToken() // Return refreshed CSRF token for subsequent resets (G02)
+    });
   });
 
   // ── 5. Health Check ───────────────────────────────────────────────

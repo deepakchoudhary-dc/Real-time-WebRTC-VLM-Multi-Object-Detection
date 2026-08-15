@@ -16,10 +16,17 @@ function safeCompareTokens(a, b) {
 }
 
 /**
- * Check if an IP address is in a private/local range (R14)
+ * Check if an IP address is in a private/local range (IPv4 and IPv6 bracket safe, G06, R14)
  */
-function isPrivateIP(ip) {
-  if (!ip) return false;
+function isPrivateIP(rawIp) {
+  if (!rawIp) return false;
+
+  // Strip brackets from IPv6 hostnames (G06)
+  let ip = rawIp.trim();
+  if (ip.startsWith('[') && ip.endsWith(']')) {
+    ip = ip.slice(1, -1);
+  }
+
   if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') return true;
 
   if (net.isIPv4(ip)) {
@@ -39,7 +46,7 @@ function isPrivateIP(ip) {
 
   if (net.isIPv6(ip)) {
     const normalized = ip.toLowerCase();
-    // ::1 loopback or fe80::/10 link-local or fc00::/7 unique local
+    // ::1 loopback, fe80::/10 link-local, fc00::/7 unique local
     if (normalized === '::1' || normalized.startsWith('fe80:') || normalized.startsWith('fc') || normalized.startsWith('fd')) {
       return true;
     }
@@ -49,14 +56,17 @@ function isPrivateIP(ip) {
 }
 
 /**
- * Validate incoming request origin (used by CORS and Socket.IO handshake)
+ * Validate incoming request origin (bracket-safe IPv6, G06)
  */
 function isOriginAllowed(origin) {
   if (!origin) return true;
 
   try {
     const parsed = new URL(origin);
-    const hostname = parsed.hostname.toLowerCase();
+    let hostname = parsed.hostname.toLowerCase();
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.slice(1, -1);
+    }
 
     if (hostname === 'localhost' || isPrivateIP(hostname)) {
       return true;
@@ -64,7 +74,11 @@ function isOriginAllowed(origin) {
 
     if (config.PUBLIC_URL) {
       const publicParsed = new URL(config.PUBLIC_URL);
-      if (hostname === publicParsed.hostname.toLowerCase()) {
+      let publicHost = publicParsed.hostname.toLowerCase();
+      if (publicHost.startsWith('[') && publicHost.endsWith(']')) {
+        publicHost = publicHost.slice(1, -1);
+      }
+      if (hostname === publicHost) {
         return true;
       }
     }
@@ -80,7 +94,7 @@ function isOriginAllowed(origin) {
 }
 
 /**
- * Validate and sanitize host header (IPv4 and IPv6 safe, R14)
+ * Validate and sanitize host header (IPv4 and IPv6 bracket safe, G06, R14)
  */
 function getValidHost(req) {
   const rawHost = req.get('host') || req.headers.host || '';
@@ -144,7 +158,7 @@ function securityHeaders(req, res, next) {
 }
 
 /**
- * Per-session CSRF token manager with TTL & Single-use Rotation (N12)
+ * Per-session CSRF token manager with TTL (G02, G12, N12)
  */
 const csrfTokenStore = new Map(); // token -> timestamp
 const CSRF_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -170,7 +184,7 @@ function verifyAndConsumeCsrfToken(req) {
     return false;
   }
 
-  // Consume token on use (single-use rotation)
+  // Consume old token
   csrfTokenStore.delete(token);
   return true;
 }
@@ -193,6 +207,7 @@ module.exports = {
   safeCompareTokens,
   isOriginAllowed,
   getValidHost,
+  isPrivateIP,
   securityHeaders,
   issueCsrfToken,
   verifyAndConsumeCsrfToken

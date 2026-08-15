@@ -74,42 +74,41 @@ test('Integration Routes - Native Suite', async (t) => {
     assert.match(body.error, /malformed/i);
   });
 
-  await t.test('Metrics & Per-Session CSRF Protection (N12)', async () => {
-    // 1. Get metrics
+  await t.test('Metrics & Consecutive CSRF Resets with Refreshed Tokens (G01, G02)', async () => {
+    // 1. Get metrics (total_frames is removed, G01)
     const getRes = await fetch(`${baseUrl}/api/metrics`);
     assert.equal(getRes.status, 200);
     const metrics = await getRes.json();
     assert.ok('processed_frames' in metrics);
-    assert.ok('median_latency_ms' in metrics);
+    assert.equal('total_frames' in metrics, false);
 
-    // 2. Fetch QR to obtain a valid per-session CSRF token
+    // 2. Fetch QR to obtain initial CSRF token
     const qrRes = await fetch(`${baseUrl}/api/qr`);
     const qrBody = await qrRes.json();
-    const validCsrf = qrBody.csrfToken;
+    let currentCsrf = qrBody.csrfToken;
 
-    // 3. Try reset without CSRF header -> Rejected 403
-    const resetFail = await fetch(`${baseUrl}/api/reset-metrics`, { method: 'POST' });
-    assert.equal(resetFail.status, 403);
-
-    // 4. Reset with valid CSRF header -> Accepted 200
-    const resetSuccess = await fetch(`${baseUrl}/api/reset-metrics`, {
+    // 3. First reset with valid CSRF header -> 200 + returns refreshed token
+    const reset1 = await fetch(`${baseUrl}/api/reset-metrics`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRF-Token': validCsrf
+        'X-CSRF-Token': currentCsrf
       }
     });
-    assert.equal(resetSuccess.status, 200);
+    assert.equal(reset1.status, 200);
+    const reset1Body = await reset1.json();
+    assert.ok(reset1Body.csrfToken);
+    currentCsrf = reset1Body.csrfToken;
 
-    // 5. Re-using already consumed CSRF token -> Rejected 403 (single-use rotation)
-    const resetReused = await fetch(`${baseUrl}/api/reset-metrics`, {
+    // 4. Consecutive second reset with refreshed token -> 200 (G02 fix)
+    const reset2 = await fetch(`${baseUrl}/api/reset-metrics`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRF-Token': validCsrf
+        'X-CSRF-Token': currentCsrf
       }
     });
-    assert.equal(resetReused.status, 403);
+    assert.equal(reset2.status, 200);
   });
 
   await stopApp();

@@ -25,11 +25,12 @@ class DesktopApp {
     this.desktopToken = null;
     this.csrfToken = null;
 
-    // AI Detector (optional desktop fallback detection, N21)
+    // AI Detector (optional desktop fallback detection, N21, G03)
     this.detector = new window.ObjectDetector();
-    this.detectOnDesktop = false;
+    this.detectOnDesktop = sessionStorage.getItem('webrtc_detect_mode') === 'desktop';
     this.desktopDetectionLoop = null;
     this.isDetectingDesktop = false; // Re-entrancy guard (R09)
+    this.benchmarkAborted = false; // Cancellable benchmark (G16)
 
     // Metrics state (Single-source truth, fixes L25 double count)
     this.processedFrames = 0;
@@ -61,6 +62,10 @@ class DesktopApp {
     this.setupSocketEvents();
     await this.initWebRTC();
     await this.fetchOrRestoreRoom();
+
+    if (this.detectOnDesktop) {
+      await this.initDesktopDetector();
+    }
   }
 
   // ── 1. DOM & Event Wiring ─────────────────────────────────────────
@@ -70,27 +75,39 @@ class DesktopApp {
     document.getElementById('downloadBtn')?.addEventListener('click', () => this.downloadMetrics());
     document.getElementById('resetBtn')?.addEventListener('click', () => this.resetMetrics());
 
-    // Detection Mode Toggle (R15)
+    // Detection Mode Toggle (Preserves active session, G03)
     const modeToggle = document.getElementById('detectModeToggle');
     if (modeToggle) {
+      modeToggle.checked = this.detectOnDesktop;
       modeToggle.addEventListener('change', async (e) => {
         this.detectOnDesktop = e.target.checked;
+        sessionStorage.setItem('webrtc_detect_mode', this.detectOnDesktop ? 'desktop' : 'mobile');
+
         if (this.detectOnDesktop) {
           await this.initDesktopDetector();
           if (this.remoteStream) this.startDesktopDetection();
         } else {
           this.stopDesktopDetection();
         }
-        await this.createNewRoom(); // Refresh QR with mode param
+
+        window.WebRTCUtils.showToast(
+          `AI Inference Mode: ${this.detectOnDesktop ? 'Desktop Hub' : 'Mobile Camera'}`,
+          'info'
+        );
       });
     }
 
-    // Pagehide / Pageshow Lifecycle (R04, N25)
+    // Pagehide / Pageshow Lifecycle with Full Re-init (G05, R04, N25)
     window.addEventListener('pagehide', () => this.dispose());
-    window.addEventListener('pageshow', (event) => {
-      if (event.persisted && !this.socket.connected) {
-        this.socket.connect();
-        this.fetchOrRestoreRoom();
+    window.addEventListener('pageshow', async (event) => {
+      if (event.persisted) {
+        if (!this.socket.connected) {
+          this.socket.connect();
+        }
+        if (!this.peerConnection || this.peerConnection.connectionState === 'closed') {
+          await this.initWebRTC();
+        }
+        await this.fetchOrRestoreRoom();
       }
     });
 
@@ -138,6 +155,9 @@ class DesktopApp {
 
   // ── 3. WebRTC Setup & Perfect Negotiation (R03 Single Owner) ─────
   async initWebRTC() {
+    if (this.negotiator) this.negotiator.dispose();
+    if (this.peerConnection) this.peerConnection.close();
+
     const iceConfig = await window.WebRTCUtils.fetchIceConfig();
     this.peerConnection = new RTCPeerConnection(iceConfig);
 
@@ -262,9 +282,6 @@ class DesktopApp {
 
     const roomEl = document.getElementById('roomCodeDisplay');
     if (roomEl) roomEl.textContent = data.roomCode || this.roomCode;
-
-    const urlEl = document.getElementById('connectionUrl');
-    if (urlEl) urlEl.textContent = data.url || '';
   }
 
   // ── 5. Socket Events ──────────────────────────────────────────────
@@ -284,7 +301,7 @@ class DesktopApp {
       this.updateConnectionBadge('disconnected');
     });
 
-    this.socket.on('peer-joined', (data) => {
+    this.socket.on('peer-joined', () => {
       this.updateConnectionBadge('connecting');
       window.WebRTCUtils.showToast('Mobile camera connected!', 'success');
     });
@@ -297,11 +314,7 @@ class DesktopApp {
     this.socket.on('room-closed', (data) => {
       sessionStorage.removeItem('webrtc_desktop_session');
       window.WebRTCUtils.showToast(data?.reason || 'Room closed. Refreshing session...', 'info');
-      try {
-        setTimeout(() => this.createNewRoom(), 1000);
-      } catch {
-        // Safe catch (R09)
-      }
+      setTimeout(() => this.createNewRoom(), 1000);
     });
 
     // Relay of detection results from phone (Single-sided pipeline, N15)
@@ -434,7 +447,7 @@ class DesktopApp {
     this.overlayCtx.globalAlpha = 1.0;
   }
 
-  // ── 7. Desktop Fallback Detection Loop (N21, R09) ──────────────────
+  // ── 7. Desktop Fallback Detection Loop (N21, R09, G15, G17) ─────────
   async initDesktopDetector() {
     const banner = document.getElementById('modelStatus');
     if (banner) {
@@ -450,8 +463,12 @@ class DesktopApp {
       banner.textContent = '✅ AI model ready (Desktop Mode)';
       setTimeout(() => { banner.style.display = 'none'; }, 2000);
     } else if (banner) {
-      banner.innerHTML = '❌ Model failed to load. <button id="retryModelBtn" style="margin-left:8px;padding:2px 8px;cursor:pointer;">Retry</button>';
-      document.getElementById('retryModelBtn')?.addEventListener('click', () => this.initDesktopDetector());
+      banner.textContent = '❌ Model failed to load.';
+      const retryBtn = document.createElement('button'); // Clean createElement (G17)
+      retryBtn.textContent = 'Retry';
+      retryBtn.style.cssText = 'margin-left:8px;padding:2px 8px;cursor:pointer;';
+      retryBtn.addEventListener('click', () => this.initDesktopDetector());
+      banner.appendChild(retryBtn);
     }
   }
 
@@ -642,7 +659,7 @@ class DesktopApp {
     ctx.fillText('FPS', 90, 14);
   }
 
-  // ── 10. Benchmark & Metrics Actions (N40) ─────────────────────────
+  // ── 10. Benchmark & Metrics Actions (G02, G16, N40) ────────────────
   async runBenchmark() {
     const btn = document.getElementById('benchmarkBtn');
     if (!btn) return;
@@ -650,12 +667,15 @@ class DesktopApp {
     btn.disabled = true;
     const oldText = btn.textContent;
     btn.textContent = '⏱️ Running (30s)...';
+    this.benchmarkAborted = false;
 
     try {
       await this.resetMetrics();
       window.WebRTCUtils.showToast('Benchmark started for 30 seconds...', 'info');
 
       await new Promise((resolve) => setTimeout(resolve, 30_000));
+
+      if (this.benchmarkAborted) return; // Cancellable check (G16)
 
       const res = await fetch('/api/metrics');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -685,12 +705,21 @@ class DesktopApp {
         }
       });
       if (res.ok) {
+        const data = await res.json();
+        // Update CSRF token with refreshed token so consecutive resets succeed (G02)
+        if (data.csrfToken) {
+          this.csrfToken = data.csrfToken;
+        }
+
         this.processedFrames = 0;
         this.fpsCounter = 0;
         this.latencyHistory = [];
         this.fpsHistory = [];
         this.updateMetricsUI(0, 0);
         window.WebRTCUtils.showToast('Metrics reset successfully.', 'info');
+      } else if (res.status === 403) {
+        window.WebRTCUtils.showToast('CSRF token expired. Refreshing session...', 'error');
+        await this.fetchOrRestoreRoom();
       }
     } catch {
       // Ignore reset failure
@@ -720,6 +749,7 @@ class DesktopApp {
 
   // ── 11. Cleanup Lifecycle ─────────────────────────────────────────
   dispose() {
+    this.benchmarkAborted = true; // Abort benchmark (G16)
     if (this.rAfHandle) cancelAnimationFrame(this.rAfHandle);
     this.stopDesktopDetection();
     if (this.resizeObserver) this.resizeObserver.disconnect();

@@ -19,10 +19,20 @@ function createHttpRedirectServer() {
     const validHost = getValidHost(req);
     const hostHeader = validHost || 'localhost';
     
-    // Clean hostname extraction without substring replace bugs (N11, F-16)
-    const hostname = hostHeader.split(':')[0];
-    const portPart = config.PORT === 443 ? '' : `:${config.PORT}`;
+    // IPv4 & IPv6 bracket-safe hostname extraction (G06, R14)
+    let hostname = 'localhost';
+    if (hostHeader.startsWith('[')) {
+      const closeBracket = hostHeader.indexOf(']');
+      if (closeBracket !== -1) {
+        hostname = hostHeader.slice(0, closeBracket + 1); // Keep brackets for IPv6 URL
+      }
+    } else if (hostHeader.includes(':')) {
+      hostname = hostHeader.split(':')[0];
+    } else {
+      hostname = hostHeader;
+    }
 
+    const portPart = config.PORT === 443 ? '' : `:${config.PORT}`;
     const redirectUrl = `https://${hostname}${portPart}${req.url}`;
     res.redirect(301, redirectUrl);
   });

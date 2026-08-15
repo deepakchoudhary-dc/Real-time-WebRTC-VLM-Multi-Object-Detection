@@ -131,16 +131,40 @@ class PhoneCameraApp {
     this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  // ── 4. Detector Initialization (N20) ──────────────────────────────
+  // ── 4. Detector Initialization with Retry UX (N20) ────────────────
   async initDetector() {
     const loaded = await this.detector.loadModel();
     if (!loaded) {
-      this.showError('Warning: Local AI detector failed to load. Streaming raw camera video.');
+      this.showModelError();
     }
+  }
+
+  showModelError() {
+    const card = document.getElementById('errorCard');
+    if (!card) return;
+
+    card.innerHTML = '';
+    const textSpan = document.createElement('span');
+    textSpan.textContent = 'Failed to load AI model. ';
+
+    const retryBtn = document.createElement('button');
+    retryBtn.textContent = 'Retry Model';
+    retryBtn.style.cssText = 'margin-left:8px;padding:2px 8px;cursor:pointer;border-radius:4px;border:none;background:#ff6b6b;color:#fff;font-weight:600;';
+    retryBtn.addEventListener('click', async () => {
+      card.style.display = 'none';
+      await this.initDetector();
+    });
+
+    card.appendChild(textSpan);
+    card.appendChild(retryBtn);
+    card.style.display = 'block';
   }
 
   // ── 5. WebRTC Setup (R03 Single Owner) ────────────────────────────
   async initWebRTC() {
+    if (this.negotiator) this.negotiator.dispose();
+    if (this.peerConnection) this.peerConnection.close();
+
     const iceConfig = await window.WebRTCUtils.fetchIceConfig();
     this.peerConnection = new RTCPeerConnection(iceConfig);
 
@@ -269,35 +293,44 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 8. Flip Camera & Quality Switch (R15 Error Recovery) ─────────
+  // ── 8. Flip Camera with Safe Track Transition (G14, R15) ─────────
   async toggleCamera() {
-    const prevMode = this.facingMode;
-    this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
-
-    const videoEl = document.getElementById('localVideo');
-    if (videoEl) {
-      if (this.facingMode === 'user') {
-        videoEl.classList.add('mirrored');
-      } else {
-        videoEl.classList.remove('mirrored');
+    const targetFacing = this.facingMode === 'user' ? 'environment' : 'user';
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: targetFacing,
+        width: { ideal: this.isHD ? 1280 : 640 },
+        height: { ideal: this.isHD ? 720 : 480 }
       }
-    }
-
-    const flipBtn = document.getElementById('flipBtn');
-    if (flipBtn) {
-      flipBtn.setAttribute('aria-pressed', this.facingMode === 'user' ? 'true' : 'false');
-    }
-
-    if (!this.localStream) return;
-
-    this.localStream.getTracks().forEach((t) => t.stop());
+    };
 
     try {
-      const constraints = this.getConstraints();
-      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      // 1. Acquire new stream FIRST before stopping previous tracks (G14)
+      const newStream = await navigator.mediaDevices.getUserMedia(constraints);
 
-      const video = document.getElementById('localVideo');
-      if (video) video.srcObject = this.localStream;
+      // 2. Stop old stream tracks cleanly
+      if (this.localStream) {
+        this.localStream.getTracks().forEach((t) => t.stop());
+      }
+
+      this.facingMode = targetFacing;
+      this.localStream = newStream;
+
+      const videoEl = document.getElementById('localVideo');
+      if (videoEl) {
+        videoEl.srcObject = this.localStream;
+        if (this.facingMode === 'user') {
+          videoEl.classList.add('mirrored');
+        } else {
+          videoEl.classList.remove('mirrored');
+        }
+      }
+
+      const flipBtn = document.getElementById('flipBtn');
+      if (flipBtn) {
+        flipBtn.setAttribute('aria-pressed', this.facingMode === 'user' ? 'true' : 'false');
+      }
 
       const newVideoTrack = this.localStream.getVideoTracks()[0];
       const sender = this.peerConnection
@@ -308,8 +341,8 @@ class PhoneCameraApp {
         await sender.replaceTrack(newVideoTrack);
       }
     } catch (err) {
-      this.facingMode = prevMode;
-      this.showError(`Failed to switch camera: ${err.message || 'Camera busy.'}`);
+      // Safe fallback: keep existing stream intact (G14)
+      this.showError(`Failed to switch camera: ${err.message || 'Camera unavailable'}`);
     }
   }
 
@@ -354,10 +387,8 @@ class PhoneCameraApp {
           this.activeObjects = detections.length;
           this.frameCount++;
 
-          // Render on mobile HUD
           this.drawPhoneOverlays(detections);
 
-          // Relay to desktop via server (N15)
           this.socket.emit('detection-result', {
             frame_id: `frame_${captureTs}`,
             capture_ts: captureTs,

@@ -62,8 +62,8 @@ class IceCandidateQueue {
     if (this.hasRemoteDescription && this.pc.remoteDescription) {
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
-      } catch (err) {
-        // Candidate discarded if invalid
+      } catch {
+        // Discard candidate on error
       }
     } else {
       this.queue.push(candidateInit);
@@ -76,8 +76,8 @@ class IceCandidateQueue {
       const candidateInit = this.queue.shift();
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
-      } catch (err) {
-        // Discard failed queued candidates
+      } catch {
+        // Discard failed candidate
       }
     }
   }
@@ -89,7 +89,7 @@ class IceCandidateQueue {
 }
 
 /**
- * MDN Perfect Negotiation Coordinator with Offer Retry & Single-Owner ICE Restart (R03, N18, N19)
+ * MDN Perfect Negotiation Coordinator with Offer Retry & Socket Handler Cleanup (G04, R03, N18, N19)
  */
 class PerfectNegotiator {
   constructor(peerConnection, socket, options = {}) {
@@ -106,6 +106,11 @@ class PerfectNegotiator {
     this.offerRetryTimer = null;
     this.offerRetryCount = 0;
     this.maxOfferRetries = 5;
+
+    // Bound listeners for clean disposal (G04)
+    this.offerHandler = this.handleOffer.bind(this);
+    this.answerHandler = this.handleAnswer.bind(this);
+    this.iceHandler = this.handleIceCandidate.bind(this);
 
     this.setupListeners();
   }
@@ -137,59 +142,61 @@ class PerfectNegotiator {
           } else {
             await this.sendOffer({ iceRestart: true });
           }
-        } catch (err) {
+        } catch {
           // Restart failed
         }
       }
     };
 
-    // 4. Incoming Offer from peer
-    this.socket.on('offer', async (description) => {
-      try {
-        const readyForOffer =
-          !this.makingOffer &&
-          (this.pc.signalingState === 'stable' || this.isSettingRemoteAnswerPending);
-        const offerCollision = !readyForOffer;
+    // 4. Socket Listeners (G04)
+    this.socket.on('offer', this.offerHandler);
+    this.socket.on('answer', this.answerHandler);
+    this.socket.on('ice-candidate', this.iceHandler);
+  }
 
-        this.ignoreOffer = !this.isPolite && offerCollision;
-        if (this.ignoreOffer) {
-          return;
-        }
+  async handleOffer(description) {
+    try {
+      const readyForOffer =
+        !this.makingOffer &&
+        (this.pc.signalingState === 'stable' || this.isSettingRemoteAnswerPending);
+      const offerCollision = !readyForOffer;
 
-        if (offerCollision) {
-          await this.pc.setLocalDescription({ type: 'rollback' });
-        }
-
-        await this.pc.setRemoteDescription(new RTCSessionDescription(description));
-        await this.candidateQueue.flush();
-
-        if (description.type === 'offer') {
-          const answer = await this.pc.createAnswer();
-          await this.pc.setLocalDescription(answer);
-          this.socket.emit('answer', this.pc.localDescription);
-        }
-      } catch (err) {
-        // Error handling incoming offer
+      this.ignoreOffer = !this.isPolite && offerCollision;
+      if (this.ignoreOffer) {
+        return;
       }
-    });
 
-    // 5. Incoming Answer from peer
-    this.socket.on('answer', async (description) => {
-      try {
-        this.clearOfferRetry();
-        this.isSettingRemoteAnswerPending = true;
-        await this.pc.setRemoteDescription(new RTCSessionDescription(description));
-        this.isSettingRemoteAnswerPending = false;
-        await this.candidateQueue.flush();
-      } catch (err) {
-        this.isSettingRemoteAnswerPending = false;
+      if (offerCollision) {
+        await this.pc.setLocalDescription({ type: 'rollback' });
       }
-    });
 
-    // 6. Incoming ICE candidate from peer
-    this.socket.on('ice-candidate', async (candidateInit) => {
-      await this.candidateQueue.addCandidate(candidateInit);
-    });
+      await this.pc.setRemoteDescription(new RTCSessionDescription(description));
+      await this.candidateQueue.flush();
+
+      if (description.type === 'offer') {
+        const answer = await this.pc.createAnswer();
+        await this.pc.setLocalDescription(answer);
+        this.socket.emit('answer', this.pc.localDescription);
+      }
+    } catch {
+      // Error handling offer
+    }
+  }
+
+  async handleAnswer(description) {
+    try {
+      this.clearOfferRetry();
+      this.isSettingRemoteAnswerPending = true;
+      await this.pc.setRemoteDescription(new RTCSessionDescription(description));
+      this.isSettingRemoteAnswerPending = false;
+      await this.candidateQueue.flush();
+    } catch {
+      this.isSettingRemoteAnswerPending = false;
+    }
+  }
+
+  async handleIceCandidate(candidateInit) {
+    await this.candidateQueue.addCandidate(candidateInit);
   }
 
   async sendOffer(options = {}) {
@@ -200,9 +207,8 @@ class PerfectNegotiator {
       await this.pc.setLocalDescription(offer);
       this.socket.emit('offer', this.pc.localDescription);
 
-      // Start offer retry timer with backoff (N18)
       this.scheduleOfferRetry();
-    } catch (err) {
+    } catch {
       // Offer creation error
     } finally {
       this.makingOffer = false;
@@ -234,6 +240,11 @@ class PerfectNegotiator {
   dispose() {
     this.clearOfferRetry();
     this.candidateQueue.clear();
+
+    // Clean up socket listeners to prevent handler stacking (G04)
+    this.socket.off('offer', this.offerHandler);
+    this.socket.off('answer', this.answerHandler);
+    this.socket.off('ice-candidate', this.iceHandler);
   }
 }
 
@@ -249,7 +260,7 @@ async function fetchIceConfig() {
       return { iceServers: data.iceServers };
     }
   } catch {
-    // Fallback to default STUN
+    // Default STUN fallback
   }
 
   return {

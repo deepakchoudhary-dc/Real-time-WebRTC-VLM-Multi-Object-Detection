@@ -31,7 +31,7 @@ test('MetricsStore - Ring buffer capacity & finiteness validation', () => {
   assert.equal(store.latencies[0], 60);
 });
 
-test('MetricsStore - Statistics calculation (Median, P95, Min, Max)', () => {
+test('MetricsStore - Statistics calculation (Median, P95, Min, Max, Processed Frames)', () => {
   const store = new MetricsStore(100);
 
   // Insert latencies: 10, 20, 30, ..., 100
@@ -40,7 +40,6 @@ test('MetricsStore - Statistics calculation (Median, P95, Min, Max)', () => {
   }
   store.incrementProcessedFrames();
   store.incrementProcessedFrames();
-  store.incrementTotalFrames();
 
   const snapshot = store.getSnapshot();
 
@@ -50,7 +49,7 @@ test('MetricsStore - Statistics calculation (Median, P95, Min, Max)', () => {
   assert.equal(snapshot.p95_latency_ms, 100);
   assert.equal(snapshot.sample_count, 10);
   assert.equal(snapshot.processed_frames, 2);
-  assert.equal(snapshot.total_frames, 1);
+  assert.equal('total_frames' in snapshot, false); // total_frames removed (G01)
 });
 
 test('MetricsStore - Reset capability', () => {

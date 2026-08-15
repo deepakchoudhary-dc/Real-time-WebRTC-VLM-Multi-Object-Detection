@@ -12,11 +12,16 @@ class RoomStore {
     this.maxRooms = options.maxRooms || config.MAX_ROOMS;
     this.roomTtlMs = options.roomTtlMs || config.ROOM_TTL_MS;
     this.abandonmentTtlMs = options.abandonmentTtlMs || config.ROOM_ABANDONMENT_TTL_MS;
+    this.sweepCallback = null;
 
     // roomCode -> RoomObject
     this.rooms = new Map();
     // socketId -> { roomCode, role }
     this.socketMap = new Map();
+  }
+
+  setSweepCallback(fn) {
+    this.sweepCallback = fn;
   }
 
   generateRoomCode(length = 6) {
@@ -33,11 +38,11 @@ class RoomStore {
   }
 
   /**
-   * Create a new room with separate desktop and phone tokens (N05)
+   * Create a new room with separate desktop and phone tokens (N05, G07)
    */
   createRoom() {
     if (this.rooms.size >= this.maxRooms) {
-      this.sweep();
+      this.sweep(this.sweepCallback); // Pass room-closed callback on overflow (G07)
       if (this.rooms.size >= this.maxRooms) {
         throw new Error('Server room limit reached. Please try again later.');
       }
@@ -63,7 +68,7 @@ class RoomStore {
       phoneToken,
       desktop: null,
       phone: null,
-      pendingOffer: null, // Buffered offer from peer if designated recipient not connected
+      pendingOffer: null,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -95,9 +100,9 @@ class RoomStore {
   }
 
   /**
-   * Join a room with full constant-time token authentication (R10, R11, N05, N09)
+   * Join a room with full constant-time token authentication and server-side reconnect grace (N05, N09, G08, R10)
    */
-  joinRoom(roomCode, role, socketId, token) {
+  joinRoom(roomCode, role, socketId, token, isSocketAliveFn) {
     if (!roomCode || typeof roomCode !== 'string') {
       return { success: false, error: 'Invalid room code' };
     }
@@ -122,15 +127,20 @@ class RoomStore {
       return { success: false, error: `Invalid ${role} authentication token. Access denied.` };
     }
 
-    // Reconnection / Slot Reclaim support (N09)
+    // Reconnection & Server-Side Grace Reclaim (N09, G08)
     const currentOccupant = room[role];
     if (currentOccupant && currentOccupant !== socketId) {
-      // Check if previous occupant socket is still actively connected
-      const existingMeta = this.socketMap.get(currentOccupant);
-      if (existingMeta) {
+      let isOccupantLive = true;
+      if (typeof isSocketAliveFn === 'function') {
+        isOccupantLive = isSocketAliveFn(currentOccupant);
+      } else {
+        isOccupantLive = this.socketMap.has(currentOccupant);
+      }
+
+      if (isOccupantLive) {
         return { success: false, error: `Role slot '${role}' is already occupied.` };
       }
-      logger.info(`Reclaiming stale slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
+      logger.info(`Gracefully reclaiming disconnected slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
     }
 
     // Leave any previously joined room (and return result for peer-left notification, R07)
@@ -204,10 +214,10 @@ class RoomStore {
   }
 
   /**
-   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08, N43)
-   * @param {function} onRoomSweep - Callback to notify & disconnect active sockets if room expired
+   * Sweep stale/abandoned rooms based on liveness (updatedAt), never killing active streams (N08, N43, G07)
    */
   sweep(onRoomSweep) {
+    const callback = onRoomSweep || this.sweepCallback;
     const now = Date.now();
     let swept = 0;
 
@@ -216,9 +226,9 @@ class RoomStore {
       const isAbandoned = (!room.desktop && !room.phone && (now - room.updatedAt > this.abandonmentTtlMs));
 
       if (isExpired || isAbandoned) {
-        if (typeof onRoomSweep === 'function') {
-          if (room.desktop) onRoomSweep(room.desktop, code);
-          if (room.phone) onRoomSweep(room.phone, code);
+        if (typeof callback === 'function') {
+          if (room.desktop) callback(room.desktop, code);
+          if (room.phone) callback(room.phone, code);
         }
 
         if (room.desktop) this.socketMap.delete(room.desktop);

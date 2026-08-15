@@ -64,10 +64,4 @@ metrics.json
 # ngrok logs
 ngrok.log
 
-# Model files (too large for git)
-models/*.onnx
-models/*.pb
-models/*.tflite
-
 plan.md
-

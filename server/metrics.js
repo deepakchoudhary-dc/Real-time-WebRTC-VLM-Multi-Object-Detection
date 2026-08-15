@@ -9,7 +9,6 @@ class MetricsStore {
   }
 
   reset() {
-    this.totalFrames = 0;
     this.processedFrames = 0;
     this.latencies = [];
     this.latencyIndex = 0;
@@ -17,7 +16,6 @@ class MetricsStore {
   }
 
   recordLatency(latency) {
-    // Strict validation: must be a finite positive number within reasonable boundary (0 to 60,000 ms)
     if (typeof latency !== 'number' || !Number.isFinite(latency) || latency < 0 || latency > 60_000) {
       return;
     }
@@ -28,10 +26,6 @@ class MetricsStore {
       this.latencies[this.latencyIndex] = latency;
     }
     this.latencyIndex = (this.latencyIndex + 1) % this.maxSamples;
-  }
-
-  incrementTotalFrames() {
-    this.totalFrames++;
   }
 
   incrementProcessedFrames() {
@@ -54,7 +48,6 @@ class MetricsStore {
 
     return {
       duration_seconds: Math.round(durationSeconds),
-      total_frames: this.totalFrames,
       processed_frames: this.processedFrames,
       median_latency_ms: Math.round(median),
       p95_latency_ms: Math.round(p95),

@@ -185,7 +185,7 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
     phone.disconnect();
   });
 
-  await t.test('Role authorization and label sanitization (R01)', () => {
+  await t.test('Role authorization and COCO label allowlist enforcement (G09, R01)', () => {
     metricsStore.reset();
     const room = roomStore.createRoom();
     const desktop = io.connectSocket('desktop_rec');
@@ -199,19 +199,21 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
       desktopReceived = data;
     });
 
-    const maliciousPayload = {
+    const mixedPayload = {
       frame_id: 'frame_abc',
       capture_ts: Date.now() - 50,
       inference_ts: Date.now(),
       detections: [
-        { label: '<img src=x onerror=alert(1)>person', score: 0.92, xmin: 0.1, ymin: 0.2, xmax: 0.5, ymax: 0.8 }
+        { label: 'person', score: 0.92, xmin: 0.1, ymin: 0.2, xmax: 0.5, ymax: 0.8 },
+        { label: 'malicious_non_coco_tag', score: 0.88, xmin: 0.2, ymin: 0.3, xmax: 0.6, ymax: 0.7 }
       ]
     };
 
-    phone.clientEmit('detection-result', maliciousPayload);
+    phone.clientEmit('detection-result', mixedPayload);
     assert.ok(desktopReceived);
-    assert.match(desktopReceived.detections[0].label, /^[a-zA-Z0-9 _-]+$/);
-    assert.equal(desktopReceived.detections[0].label.includes('<'), false);
+    // Non-COCO tag was filtered out, valid 'person' tag kept (G09)
+    assert.equal(desktopReceived.detections.length, 1);
+    assert.equal(desktopReceived.detections[0].label, 'person');
 
     desktop.disconnect();
     phone.disconnect();

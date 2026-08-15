@@ -5,7 +5,7 @@ const { roomStore } = require('./room-store');
 const { metricsStore } = require('./metrics');
 const { SocketRateLimiter } = require('./rate-limiter');
 
-// COCO-80 label set allowlist for strict input sanitation (R01)
+// COCO-80 label set allowlist for strict input sanitation (G09, R01)
 const COCO_LABELS = new Set([
   'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
   'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
@@ -21,7 +21,7 @@ const COCO_LABELS = new Set([
 ]);
 
 /**
- * Sanitize and validate detection result payload (R01)
+ * Sanitize and validate detection result payload (G09, R01)
  */
 function validateDetectionResult(payload) {
   if (!payload || typeof payload !== 'object') return null;
@@ -47,10 +47,11 @@ function validateDetectionResult(payload) {
       typeof d.ymax === 'number' &&
       Number.isFinite(d.ymax)
     ) {
-      const sanitizedLabel = d.label.replace(/[^a-zA-Z0-9 _-]/g, '').trim().substring(0, 32);
-      if (sanitizedLabel) {
+      const cleanLabel = d.label.toLowerCase().trim();
+      // Enforce COCO allowlist (G09)
+      if (COCO_LABELS.has(cleanLabel)) {
         validDetections.push({
-          label: sanitizedLabel,
+          label: cleanLabel,
           score: Math.round(d.score * 1000) / 1000,
           xmin: Math.max(0, Math.min(1, d.xmin)),
           ymin: Math.max(0, Math.min(1, d.ymin)),
@@ -128,7 +129,7 @@ function attachSignaling(io) {
       next();
     });
 
-    // ── 1. Room Joining (N05, N09, R07) ──────────────────────────────
+    // ── 1. Room Joining (N05, N09, G08, R07) ─────────────────────────
     socket.on('join-room', (payload, callback) => {
       if (!payload || typeof payload !== 'object') {
         const err = { error: 'Invalid join-room payload.' };
@@ -138,7 +139,12 @@ function attachSignaling(io) {
       }
 
       const { roomCode, role, token } = payload;
-      const result = roomStore.joinRoom(roomCode, role, socket.id, token);
+      const isSocketAlive = (id) => {
+        const socketsMap = io.sockets?.sockets || io.sockets;
+        return socketsMap ? (socketsMap.has ? socketsMap.has(id) : !!socketsMap.get?.(id)) : false;
+      };
+
+      const result = roomStore.joinRoom(roomCode, role, socket.id, token, isSocketAlive);
 
       if (!result.success) {
         logger.warn(`Failed join attempt: ${socket.id} -> ${logger.maskCode(roomCode)} (${result.error})`);
@@ -151,7 +157,7 @@ function attachSignaling(io) {
       const { room, peerSocketId, bufferedOffer, previousLeave } = result;
       logger.info(`Peer joined room: ${logger.maskCode(room.code)} as ${role} (id: ${socket.id})`);
 
-      // If this socket was previously in another room, notify the previous peer (R07)
+      // If this socket was previously in another room, notify previous peer (R07)
       if (previousLeave && previousLeave.otherPeerId) {
         io.to(previousLeave.otherPeerId).emit('peer-left', { role: previousLeave.role });
       }
@@ -248,7 +254,6 @@ function attachSignaling(io) {
 
       const peerSocketId = roomStore.getPeerSocketId(socket.id);
       if (peerSocketId) {
-        // Count frame ONLY if successfully relayed to peer (N15)
         metricsStore.incrementProcessedFrames();
         io.to(peerSocketId).emit('detection-result', validResult);
       }

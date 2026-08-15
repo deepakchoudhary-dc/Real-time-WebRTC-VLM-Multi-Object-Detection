@@ -7,6 +7,9 @@ All endpoints are served over HTTPS. Rate limiting of 120 requests/minute applie
 ### `GET /api/qr`
 Generates a new session room and returns authenticated desktop and phone tokens, pairing URL, and a QR code image.
 
+**Query Parameters:**
+- `detect` *(optional)*: Set to `desktop` to offload inference to Desktop Hub.
+
 **Response `200 OK`:**
 ```json
 {
@@ -37,13 +40,12 @@ Returns STUN and TURN server configuration. If configured with `TURN_SECRET`, re
 ---
 
 ### `GET /api/metrics`
-Returns aggregate processing and latency statistics for the active server instance.
+Returns aggregate performance and latency statistics for the active server instance.
 
 **Response `200 OK`:**
 ```json
 {
   "duration_seconds": 120,
-  "total_frames": 650,
   "processed_frames": 650,
   "median_latency_ms": 42,
   "p95_latency_ms": 78,
@@ -58,7 +60,7 @@ Returns aggregate processing and latency statistics for the active server instan
 ---
 
 ### `POST /api/reset-metrics`
-Resets all recorded latency samples and frame counters.
+Resets all recorded latency samples and frame counters. Returns a refreshed CSRF token for subsequent requests.
 
 **Headers:**
 - `X-CSRF-Token`: `<csrfToken>` *(Single-use per-session token)*
@@ -66,7 +68,8 @@ Resets all recorded latency samples and frame counters.
 **Response `200 OK`:**
 ```json
 {
-  "message": "Metrics successfully reset."
+  "message": "Metrics successfully reset.",
+  "csrfToken": "b2c3d4..."
 }
 ```
 
@@ -97,6 +100,7 @@ Liveness probe endpoint for containers and monitoring.
 | `answer` | `RTCSessionDescriptionInit` | Sends SDP answer (relayed directly to peer) |
 | `ice-candidate` | `RTCIceCandidateInit` | Relays ICE candidate to peer |
 | `detection-result` | `{ frame_id, capture_ts, inference_ts, detections: [...] }` | Relays AI detection results (Phone only) |
+| `metrics-report` | `{ latency: number }` | Reports live E2E latency measurement (Desktop only) |
 
 ### Server -> Client
 

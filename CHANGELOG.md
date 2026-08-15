@@ -2,27 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
-## [2.1.1] - 2026-08-15 (Part 2 Audit Remediation)
+## [2.1.1] - 2026-08-15
 
-### 🔒 Security & Authentication Completion
-- **N05 (Dual-Token Authentication):** Implemented separate 128-bit `desktopToken` and `phoneToken` generation on `/api/qr`. Desktop and mobile clients must present matching tokens to join room slots, completely preventing unauthenticated desktop stream theft.
-- **N06 (Bounded Room Minting):** Removed auto-create path in `joinRoom`; all room allocation is strictly gated by `createRoom()` and capped at `MAX_ROOMS`.
-- **N07 (Connection Cap):** Enforced `MAX_CONNECTIONS` socket admission guard in `io.use` middleware.
-- **N08 (Liveness GC):** Shifted RoomStore garbage collection from creation time to inactivity window (`updatedAt`), preventing active long-running streams from being dropped mid-session.
-- **N09 (Slot Reclaim on Reconnect):** Enabled instant slot reclaim for reconnecting clients presenting valid session tokens.
-- **N10 (Bidirectional Offer Buffering):** Implemented offer buffering for both phone-first and desktop-first join orders with client-side retry backoff.
-- **N11 (Session Persistence):** Desktop session state is saved in `sessionStorage` to restore rooms on browser reload without generating orphan rooms.
-- **N12 (Per-Session CSRF):** Replaced static CSRF secret with single-use per-session rotating tokens with 1-hour TTL, accepted exclusively via `X-CSRF-Token` headers.
-- **N31 (Rate Limit Error Notifications):** Added `error-message` event emission on socket throttling and `X-RateLimit-*` / `Retry-After` headers to HTTP rate limiters.
-- **N33 (Malformed JSON Handling):** Express error handler cleanly returns HTTP 400 for malformed JSON bodies.
+### 🔒 Security, Authentication & Reliability
+- **G09 / R01 (COCO Allowlist & XSS Sanitization):** Enforced strict COCO-80 label allowlist in detection validation and migrated detection feed rendering to safe `textContent` DOM nodes.
+- **G02 / G12 (Refreshed CSRF Token Rotation):** `/api/reset-metrics` returns refreshed single-use CSRF tokens, allowing consecutive resets and benchmark runs without 403 errors.
+- **G06 / R14 (IPv6 Bracket-Safe Validation):** Normalized IPv6 hostnames in origin checks and HTTP redirection (`isOriginAllowed`, `getValidHost`, `http-redirect.js`).
+- **G07 / G08 (Unified GC Sweeps & Grace Reclaim):** Connected overflow sweeps to the shared `room-closed` notification callback and enabled instant slot reclaim for disconnected sockets.
+- **R10 / R11 (Constant-Time Token Verification):** Verified session tokens with `crypto.timingSafeEqual` in `RoomStore`.
+- **G10 / G11 (Configuration & ICE Knobs):** Restored environment variable controls for rate limiters, payload bounds, and validated STUN/TURN URL schemes.
+- **G01 / R13 (Truthful Metrics):** Eliminated dead `total_frames` counter; `processed_frames` serves as single truthful counter.
 
-### ⚡ Build, Pipeline & Frontend
-- **N01 & N02 (Dependency Alignment):** Corrected `selfsigned` version to `^3.0.1` and aligned `package.json` manifest.
-- **N03 (Multi-Stage Docker):** Implemented true multi-stage `node:22-alpine` build with non-root user `node`, `dumb-init`, and health checks.
-- **N04 (CI Suite):** Added dependency installation, cache, and test suite execution to GitHub Actions CI workflow.
-- **N15 & N16 (Canonical Metrics):** Eliminated cross-clock server latency calculations; E2E latency is computed cleanly on the client (`Date.now() - capture_ts`), and frame counts increment only on successful peer delivery.
-- **N21 (Single-Sided Detection Gating):** Phone detection loop pauses when `detect=desktop` mode is active to prevent redundant double inference.
-- **N23 (Phone Orientation):** Added `ResizeObserver` on mobile camera container for responsive canvas orientation adjustments.
-- **N24 & N25 (Lifecycle & bfcache):** Fixed interval leak in phone HUD metrics, added `detector.dispose()`, and implemented visibility / bfcache restore handling.
-- **N30 (Deployment Guide):** Added comprehensive `DEPLOYMENT.md` covering Docker Compose, systemd, reverse proxies, and Coturn TURN setup.
-- **N34 (Test Timeout Protection):** Added 10-second subprocess timeout to `test/run-all.js`.
+### ⚡ WebRTC & Frontend
+- **R02 (Live E2E Latency Reporting):** Desktop reports measured live E2E latency to the server via `metrics-report`, powering live `/api/metrics` percentiles.
+- **G04 / G05 (Bfcache Full Re-Init & Listener Cleanup):** Cleaned up socket listeners in `PerfectNegotiator.dispose()` and implemented full WebRTC re-initialization on `pageshow`.
+- **G03 (Session-Preserving Mode Toggle):** Switching between Mobile GPU and Desktop Hub detection preserves the active session and room code.
+- **G14 (Safe Camera Switch Fallback):** Camera switching keeps active streams intact until new constraints succeed.
+- **N20 (Mobile Model Retry UX):** Added interactive retry button on mobile camera detector load failures.
+- **G16 (Cancellable Benchmark):** Benchmark executions abort cleanly on page teardown.
