@@ -118,6 +118,75 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
     validPhone.disconnect();
   });
 
+  await t.test('Idempotent Re-Join produces no spurious peer-left (H1)', () => {
+    const room = roomStore.createRoom();
+    const desktop = io.connectSocket('desktop_idem');
+    const phone = io.connectSocket('phone_idem');
+
+    let peerLeftEmitted = false;
+    phone.on('client_received_peer-left', () => {
+      peerLeftEmitted = true;
+    });
+
+    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.desktopToken });
+    phone.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken });
+
+    // Desktop re-joins the same room (pageshow / reconnect simulation)
+    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.desktopToken });
+
+    // Assert no spurious peer-left was emitted to the phone
+    assert.equal(peerLeftEmitted, false);
+
+    desktop.disconnect();
+    phone.disconnect();
+  });
+
+  await t.test('Authoritative Same-Token Reconnect and Reclaim (P19, G08)', () => {
+    const room = roomStore.createRoom();
+    const phoneOld = io.connectSocket('phone_old_sock');
+    const desktop = io.connectSocket('desktop_watch');
+
+    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.desktopToken });
+    phoneOld.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken });
+    assert.equal(room.phone, 'phone_old_sock');
+
+    // Phone reconnects on new socket with the authoritative secret phoneToken
+    const phoneNew = io.connectSocket('phone_new_sock');
+    let reconnectSuccess = false;
+    phoneNew.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken }, (ack) => {
+      if (ack && ack.success) reconnectSuccess = true;
+    });
+
+    assert.equal(reconnectSuccess, true);
+    assert.equal(room.phone, 'phone_new_sock');
+    assert.equal(roomStore.socketMap.has('phone_old_sock'), false);
+
+    desktop.disconnect();
+    phoneOld.disconnect();
+    phoneNew.disconnect();
+  });
+
+  await t.test('Real-time Detect Mode Propagation (H3)', () => {
+    const room = roomStore.createRoom();
+    const desktop = io.connectSocket('desktop_mode');
+    const phone = io.connectSocket('phone_mode');
+
+    desktop.clientEmit('join-room', { roomCode: room.code, role: 'desktop', token: room.desktopToken });
+    phone.clientEmit('join-room', { roomCode: room.code, role: 'phone', token: room.phoneToken });
+
+    let phoneReceivedMode = null;
+    phone.on('client_received_detect-mode', (data) => {
+      phoneReceivedMode = data.mode;
+    });
+
+    // Desktop switches to desktop mode
+    desktop.clientEmit('detect-mode', { mode: 'desktop' });
+    assert.equal(phoneReceivedMode, 'desktop');
+
+    desktop.disconnect();
+    phone.disconnect();
+  });
+
   await t.test('Offer Buffering - Phone offers before Desktop joins (N10)', () => {
     const room = roomStore.createRoom();
     const phone = io.connectSocket('phone_early');
@@ -185,7 +254,7 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
     phone.disconnect();
   });
 
-  await t.test('Role authorization and COCO label allowlist enforcement (G09, R01)', () => {
+  await t.test('Role authorization and COCO label allowlist enforcement (G09, R01, N35)', () => {
     metricsStore.reset();
     const room = roomStore.createRoom();
     const desktop = io.connectSocket('desktop_rec');
@@ -200,9 +269,7 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
     });
 
     const mixedPayload = {
-      frame_id: 'frame_abc',
       capture_ts: Date.now() - 50,
-      inference_ts: Date.now(),
       detections: [
         { label: 'person', score: 0.92, xmin: 0.1, ymin: 0.2, xmax: 0.5, ymax: 0.8 },
         { label: 'malicious_non_coco_tag', score: 0.88, xmin: 0.2, ymin: 0.3, xmax: 0.6, ymax: 0.7 }
@@ -214,6 +281,9 @@ test('Signaling Integration - Full Token Auth, Live Metrics Relay & Glare Resolu
     // Non-COCO tag was filtered out, valid 'person' tag kept (G09)
     assert.equal(desktopReceived.detections.length, 1);
     assert.equal(desktopReceived.detections[0].label, 'person');
+    assert.ok(desktopReceived.capture_ts);
+    assert.equal('frame_id' in desktopReceived, false); // Cleaned up (N35)
+    assert.equal('inference_ts' in desktopReceived, false);
 
     desktop.disconnect();
     phone.disconnect();

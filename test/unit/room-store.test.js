@@ -52,29 +52,47 @@ test('RoomStore - Constant-Time Token Authentication (N05, R10, R11)', () => {
   assert.equal(joinPhoneValid.success, true);
   assert.equal(room.phone, 'socket_p1');
 
-  // 6. Third-party attempts to occupy active slots -> Rejected
-  const join3rd = store.joinRoom(room.code, 'desktop', 'socket_attacker', room.desktopToken);
+  // 6. Attacker attempts to join with wrong token -> Rejected
+  const join3rd = store.joinRoom(room.code, 'desktop', 'socket_attacker', 'wrong_token');
   assert.equal(join3rd.success, false);
-  assert.match(join3rd.error, /already occupied/i);
+  assert.match(join3rd.error, /Access denied/i);
 
   store.dispose();
 });
 
-test('RoomStore - Reconnection Slot Reclaim (N09)', () => {
+test('RoomStore - Idempotent Join (H1)', () => {
   const store = new RoomStore({ maxRooms: 10 });
   const room = store.createRoom();
 
-  store.joinRoom(room.code, 'desktop', 'socket_d1', room.desktopToken);
+  // Initial join
+  const res1 = store.joinRoom(room.code, 'desktop', 'socket_d1', room.desktopToken);
+  assert.equal(res1.success, true);
+  assert.equal(res1.previousLeave, null);
+
+  // Re-joining same room and role with same socket -> Idempotent no-op (no previousLeave)
+  const res2 = store.joinRoom(room.code, 'desktop', 'socket_d1', room.desktopToken);
+  assert.equal(res2.success, true);
+  assert.equal(res2.previousLeave, null);
   assert.equal(room.desktop, 'socket_d1');
 
-  // Desktop disconnects (leaves room)
-  store.leaveRoom('socket_d1');
-  assert.equal(room.desktop, null);
+  store.dispose();
+});
 
-  // Reconnecting desktop joins with new socket ID and same valid token -> Reclaims slot
+test('RoomStore - Authoritative Same-Token Reclaim and SocketMap Cleanup (P19, H4, G08, N09)', () => {
+  const store = new RoomStore({ maxRooms: 10 });
+  const room = store.createRoom();
+
+  store.joinRoom(room.code, 'desktop', 'socket_d1_old', room.desktopToken);
+  assert.equal(room.desktop, 'socket_d1_old');
+  assert.ok(store.socketMap.has('socket_d1_old'));
+
+  // Reconnecting desktop joins with socket_d2_new presenting the same authoritative desktopToken
   const reclaim = store.joinRoom(room.code, 'desktop', 'socket_d2_new', room.desktopToken);
   assert.equal(reclaim.success, true);
   assert.equal(room.desktop, 'socket_d2_new');
+  // Verified old socket mapping removed from socketMap (H4)
+  assert.equal(store.socketMap.has('socket_d1_old'), false);
+  assert.ok(store.socketMap.has('socket_d2_new'));
 
   store.dispose();
 });

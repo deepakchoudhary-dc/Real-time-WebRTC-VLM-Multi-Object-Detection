@@ -18,7 +18,7 @@ function startServer() {
   // Create HTTPS Server
   const httpsServer = https.createServer({ key, cert }, app);
 
-  // Initialize Socket.IO with strict CORS & Buffer limits
+  // Initialize Socket.IO with strict CORS, Buffer limits & aligned heartbeat (P19)
   const io = new SocketIOServer(httpsServer, {
     cors: {
       origin: (origin, callback) => {
@@ -32,8 +32,8 @@ function startServer() {
       methods: ['GET', 'POST']
     },
     maxHttpBufferSize: config.MAX_PAYLOAD_BYTES,
-    pingTimeout: 20_000,
-    pingInterval: 10_000
+    pingTimeout: 10_000,
+    pingInterval: 5_000
   });
 
   // Shared sweep notify callback for interval and overflow sweeps (G07)

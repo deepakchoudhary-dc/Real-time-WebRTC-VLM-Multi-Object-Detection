@@ -25,14 +25,14 @@ class DesktopApp {
     this.desktopToken = null;
     this.csrfToken = null;
 
-    // AI Detector (optional desktop fallback detection, N21, G03)
+    // AI Detector (optional desktop fallback detection, N21, G03, H3)
     this.detector = new window.ObjectDetector();
     this.detectOnDesktop = sessionStorage.getItem('webrtc_detect_mode') === 'desktop';
     this.desktopDetectionLoop = null;
     this.isDetectingDesktop = false; // Re-entrancy guard (R09)
     this.benchmarkAborted = false; // Cancellable benchmark (G16)
 
-    // Metrics state (Single-source truth, fixes L25 double count)
+    // Metrics state (Single-source truth)
     this.processedFrames = 0;
     this.fpsCounter = 0;
     this.currentFps = 0;
@@ -75,13 +75,16 @@ class DesktopApp {
     document.getElementById('downloadBtn')?.addEventListener('click', () => this.downloadMetrics());
     document.getElementById('resetBtn')?.addEventListener('click', () => this.resetMetrics());
 
-    // Detection Mode Toggle (Preserves active session, G03)
+    // Detection Mode Toggle (Propagates live to mobile peer and persists, G03, H3)
     const modeToggle = document.getElementById('detectModeToggle');
     if (modeToggle) {
       modeToggle.checked = this.detectOnDesktop;
       modeToggle.addEventListener('change', async (e) => {
         this.detectOnDesktop = e.target.checked;
         sessionStorage.setItem('webrtc_detect_mode', this.detectOnDesktop ? 'desktop' : 'mobile');
+
+        // Propagate mode to connected phone in real time (H3)
+        this.socket.emit('detect-mode', { mode: this.detectOnDesktop ? 'desktop' : 'mobile' });
 
         if (this.detectOnDesktop) {
           await this.initDesktopDetector();
@@ -97,15 +100,19 @@ class DesktopApp {
       });
     }
 
-    // Pagehide / Pageshow Lifecycle with Full Re-init (G05, R04, N25)
+    // Pagehide / Pageshow Lifecycle with Full Re-init (G05, H2, H10, R04, N25)
     window.addEventListener('pagehide', () => this.dispose());
     window.addEventListener('pageshow', async (event) => {
+      this.benchmarkAborted = false; // Reset aborted flag on restore (H10)
       if (event.persisted) {
         if (!this.socket.connected) {
           this.socket.connect();
         }
         if (!this.peerConnection || this.peerConnection.connectionState === 'closed') {
           await this.initWebRTC();
+        }
+        if (this.detectOnDesktop && !this.detector.modelLoaded) {
+          await this.initDesktopDetector(); // Re-init desktop detector on restore (H2)
         }
         await this.fetchOrRestoreRoom();
       }
@@ -191,7 +198,7 @@ class DesktopApp {
     };
   }
 
-  // ── 4. Room & QR Code with Session Persistence & Rejoin Backoff (N05, N11, R08) ─
+  // ── 4. Room & QR Code with Session Persistence & Rejoin Backoff (N05, N11, R08, H11) ─
   async fetchOrRestoreRoom() {
     try {
       const savedSession = sessionStorage.getItem('webrtc_desktop_session');
@@ -254,8 +261,7 @@ class DesktopApp {
         roomCode: this.roomCode,
         desktopToken: this.desktopToken,
         csrfToken: this.csrfToken,
-        qr: data.qr,
-        url: data.url
+        qr: data.qr
       }));
 
       this.renderRoomDetails(data);
@@ -303,11 +309,17 @@ class DesktopApp {
 
     this.socket.on('peer-joined', () => {
       this.updateConnectionBadge('connecting');
+      // Synchronize current mode to newly connected peer (H3)
+      this.socket.emit('detect-mode', { mode: this.detectOnDesktop ? 'desktop' : 'mobile' });
       window.WebRTCUtils.showToast('Mobile camera connected!', 'success');
     });
 
     this.socket.on('peer-left', () => {
       this.updateConnectionBadge('disconnected');
+      this.lastDetections = [];
+      if (this.overlayCtx && this.overlayCanvas) {
+        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+      }
       window.WebRTCUtils.showToast('Mobile camera disconnected.', 'info');
     });
 
@@ -329,16 +341,14 @@ class DesktopApp {
     });
   }
 
-  // ── 6. Detection Processing & Live Metrics (R01, R02, N16) ─────────
+  // ── 6. Detection Processing & Live Metrics (R01, R02, N16, H8) ─────
   handleDetectionFrame(result) {
     const now = Date.now();
-    // Canonical E2E Latency (N16)
     const latency = Math.max(0, now - (result.capture_ts || now));
 
     // Report live latency measurement back to server for /api/metrics (R02)
     this.socket.emit('metrics-report', { latency });
 
-    // Single increment path (L25 fix)
     this.processedFrames++;
     this.fpsCounter++;
 
@@ -367,84 +377,32 @@ class DesktopApp {
   drawDetections() {
     if (!this.overlayCanvas || !this.overlayCtx) return;
 
-    const video = document.getElementById('remoteVideo');
-    const width = this.overlayCanvas.width / (window.devicePixelRatio || 1);
-    const height = this.overlayCanvas.height / (window.devicePixelRatio || 1);
-
-    this.overlayCtx.clearRect(0, 0, width, height);
-
     const now = Date.now();
     const elapsed = now - this.lastDetectionTs;
 
     if (elapsed > this.displayDurationMs || this.lastDetections.length === 0) {
+      this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
       return;
     }
 
-    const fitRect = window.WebRTCUtils.objectFitRect(
-      width,
-      height,
-      video?.videoWidth || width,
-      video?.videoHeight || height,
-      'contain'
-    );
-
+    const video = document.getElementById('remoteVideo');
     let alpha = 1.0;
     const fadeWindow = 500;
     if (elapsed > this.displayDurationMs - fadeWindow) {
       alpha = 1.0 - (elapsed - (this.displayDurationMs - fadeWindow)) / fadeWindow;
     }
 
-    this.overlayCtx.globalAlpha = Math.max(0, Math.min(1, alpha));
-    const palette = ['#51cf66', '#339af0', '#fcc419', '#ff6b6b', '#cc5de8', '#20c997', '#ff922b'];
-
-    this.lastDetections.forEach((det, idx) => {
-      const color = palette[idx % palette.length];
-      const boxX = fitRect.x + det.xmin * fitRect.width;
-      const boxY = fitRect.y + det.ymin * fitRect.height;
-      const boxW = (det.xmax - det.xmin) * fitRect.width;
-      const boxH = (det.ymax - det.ymin) * fitRect.height;
-
-      // Bounding Box
-      this.overlayCtx.strokeStyle = color;
-      this.overlayCtx.lineWidth = 2.5;
-      this.overlayCtx.strokeRect(boxX, boxY, boxW, boxH);
-
-      // Corner brackets
-      const cornerLen = Math.min(boxW, boxH) * 0.18;
-      this.overlayCtx.lineWidth = 4;
-      this.overlayCtx.beginPath();
-      this.overlayCtx.moveTo(boxX, boxY + cornerLen);
-      this.overlayCtx.lineTo(boxX, boxY);
-      this.overlayCtx.lineTo(boxX + cornerLen, boxY);
-      this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY);
-      this.overlayCtx.lineTo(boxX + boxW);
-      this.overlayCtx.lineTo(boxX + boxW, boxY + cornerLen);
-      this.overlayCtx.moveTo(boxX, boxY + boxH - cornerLen);
-      this.overlayCtx.lineTo(boxX, boxY + boxH);
-      this.overlayCtx.lineTo(boxX + cornerLen, boxY + boxH);
-      this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY + boxH);
-      this.overlayCtx.lineTo(boxX + boxW);
-      this.overlayCtx.lineTo(boxX + boxW, boxY + boxH - cornerLen);
-      this.overlayCtx.stroke();
-
-      // Label Tag (Safe text drawing)
-      const labelText = `${det.label} ${Math.round(det.score * 100)}%`;
-      this.overlayCtx.font = '600 12px Inter, sans-serif';
-      const textMetrics = this.overlayCtx.measureText(labelText);
-      const tagH = 20;
-      const tagW = textMetrics.width + 12;
-      const tagY = boxY > tagH + 4 ? boxY - tagH - 3 : boxY + 3;
-
-      this.overlayCtx.fillStyle = color;
-      this.overlayCtx.beginPath();
-      this.overlayCtx.roundRect ? this.overlayCtx.roundRect(boxX, tagY, tagW, tagH, 4) : this.overlayCtx.rect(boxX, tagY, tagW, tagH);
-      this.overlayCtx.fill();
-
-      this.overlayCtx.fillStyle = '#ffffff';
-      this.overlayCtx.fillText(labelText, boxX + 6, tagY + 14);
-    });
-
-    this.overlayCtx.globalAlpha = 1.0;
+    // Shared renderer (H8)
+    window.WebRTCUtils.drawBoundingBoxes(
+      this.overlayCtx,
+      this.overlayCanvas,
+      video,
+      this.lastDetections,
+      {
+        alpha,
+        fitMode: 'contain'
+      }
+    );
   }
 
   // ── 7. Desktop Fallback Detection Loop (N21, R09, G15, G17) ─────────
@@ -464,7 +422,7 @@ class DesktopApp {
       setTimeout(() => { banner.style.display = 'none'; }, 2000);
     } else if (banner) {
       banner.textContent = '❌ Model failed to load.';
-      const retryBtn = document.createElement('button'); // Clean createElement (G17)
+      const retryBtn = document.createElement('button');
       retryBtn.textContent = 'Retry';
       retryBtn.style.cssText = 'margin-left:8px;padding:2px 8px;cursor:pointer;';
       retryBtn.addEventListener('click', () => this.initDesktopDetector());
@@ -476,7 +434,7 @@ class DesktopApp {
     if (this.desktopDetectionLoop) return;
 
     this.desktopDetectionLoop = setInterval(async () => {
-      if (this.isDetectingDesktop) return; // Re-entrancy guard (R09)
+      if (this.isDetectingDesktop) return;
       this.isDetectingDesktop = true;
 
       try {
@@ -486,7 +444,6 @@ class DesktopApp {
           const detections = await this.detector.detect(video);
           const frame = {
             capture_ts: captureTs,
-            inference_ts: Date.now(),
             detections
           };
           this.handleDetectionFrame(frame);
@@ -659,7 +616,7 @@ class DesktopApp {
     ctx.fillText('FPS', 90, 14);
   }
 
-  // ── 10. Benchmark & Metrics Actions (G02, G16, N40) ────────────────
+  // ── 10. Benchmark & Metrics Actions (G02, H5, G16, N40) ────────────
   async runBenchmark() {
     const btn = document.getElementById('benchmarkBtn');
     if (!btn) return;
@@ -675,7 +632,7 @@ class DesktopApp {
 
       await new Promise((resolve) => setTimeout(resolve, 30_000));
 
-      if (this.benchmarkAborted) return; // Cancellable check (G16)
+      if (this.benchmarkAborted) return;
 
       const res = await fetch('/api/metrics');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -695,7 +652,7 @@ class DesktopApp {
     }
   }
 
-  async resetMetrics() {
+  async resetMetrics(isRetry = false) {
     try {
       const res = await fetch('/api/reset-metrics', {
         method: 'POST',
@@ -706,7 +663,6 @@ class DesktopApp {
       });
       if (res.ok) {
         const data = await res.json();
-        // Update CSRF token with refreshed token so consecutive resets succeed (G02)
         if (data.csrfToken) {
           this.csrfToken = data.csrfToken;
         }
@@ -717,9 +673,14 @@ class DesktopApp {
         this.fpsHistory = [];
         this.updateMetricsUI(0, 0);
         window.WebRTCUtils.showToast('Metrics reset successfully.', 'info');
-      } else if (res.status === 403) {
-        window.WebRTCUtils.showToast('CSRF token expired. Refreshing session...', 'error');
-        await this.fetchOrRestoreRoom();
+      } else if (res.status === 403 && !isRetry) {
+        // Auto-recover from CSRF expiration by refreshing token once (H5)
+        const qrRes = await fetch('/api/qr');
+        if (qrRes.ok) {
+          const qrData = await qrRes.json();
+          this.csrfToken = qrData.csrfToken;
+          await this.resetMetrics(true);
+        }
       }
     } catch {
       // Ignore reset failure
@@ -749,7 +710,7 @@ class DesktopApp {
 
   // ── 11. Cleanup Lifecycle ─────────────────────────────────────────
   dispose() {
-    this.benchmarkAborted = true; // Abort benchmark (G16)
+    this.benchmarkAborted = true;
     if (this.rAfHandle) cancelAnimationFrame(this.rAfHandle);
     this.stopDesktopDetection();
     if (this.resizeObserver) this.resizeObserver.disconnect();

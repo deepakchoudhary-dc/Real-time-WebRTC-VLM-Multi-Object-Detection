@@ -26,7 +26,10 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Security Audit Gate
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Run Test Suite
         run: node test/run-all.js

@@ -42,7 +42,7 @@ class RoomStore {
    */
   createRoom() {
     if (this.rooms.size >= this.maxRooms) {
-      this.sweep(this.sweepCallback); // Pass room-closed callback on overflow (G07)
+      this.sweep(this.sweepCallback);
       if (this.rooms.size >= this.maxRooms) {
         throw new Error('Server room limit reached. Please try again later.');
       }
@@ -100,7 +100,7 @@ class RoomStore {
   }
 
   /**
-   * Join a room with full constant-time token authentication and server-side reconnect grace (N05, N09, G08, R10)
+   * Join a room with authoritative same-token reconnect grace and idempotent checks (P19, G08, H1, H4)
    */
   joinRoom(roomCode, role, socketId, token, isSocketAliveFn) {
     if (!roomCode || typeof roomCode !== 'string') {
@@ -127,24 +127,32 @@ class RoomStore {
       return { success: false, error: `Invalid ${role} authentication token. Access denied.` };
     }
 
-    // Reconnection & Server-Side Grace Reclaim (N09, G08)
-    const currentOccupant = room[role];
-    if (currentOccupant && currentOccupant !== socketId) {
-      let isOccupantLive = true;
-      if (typeof isSocketAliveFn === 'function') {
-        isOccupantLive = isSocketAliveFn(currentOccupant);
-      } else {
-        isOccupantLive = this.socketMap.has(currentOccupant);
-      }
-
-      if (isOccupantLive) {
-        return { success: false, error: `Role slot '${role}' is already occupied.` };
-      }
-      logger.info(`Gracefully reclaiming disconnected slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
+    // 1. Idempotent Join Check (H1): If this socket already holds this slot in this room, do nothing
+    if (room[role] === socketId) {
+      room.updatedAt = Date.now();
+      return {
+        success: true,
+        room,
+        peerSocketId: role === 'desktop' ? room.phone : room.desktop,
+        bufferedOffer: null,
+        previousLeave: null
+      };
     }
 
-    // Leave any previously joined room (and return result for peer-left notification, R07)
-    const previousLeave = this.leaveRoom(socketId);
+    // 2. Authoritative Same-Token Reconnect & Reclaim (P19, G08, H4)
+    const currentOccupant = room[role];
+    if (currentOccupant && currentOccupant !== socketId) {
+      // Because the client presents the exact valid secret token, they are the authoritative owner of this slot
+      logger.info(`Authoritative reconnect reclaiming slot '${role}' in room ${logger.maskCode(cleanCode)} for socket ${socketId}`);
+      this.socketMap.delete(currentOccupant);
+    }
+
+    // 3. Leave any previously joined room (only if switching from a different room, H1, R07)
+    let previousLeave = null;
+    const existingMeta = this.socketMap.get(socketId);
+    if (existingMeta && existingMeta.roomCode !== cleanCode) {
+      previousLeave = this.leaveRoom(socketId);
+    }
 
     // Assign slot
     room[role] = socketId;

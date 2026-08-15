@@ -27,7 +27,7 @@ class PhoneCameraApp {
     this.facingMode = 'environment'; // Default back camera
     this.isHD = false;
 
-    // Detection mode: if detect=desktop is set, mobile skips local AI inference (N21, R15)
+    // Detection mode: if detect=desktop is set, mobile skips local AI inference (N21, R15, H3)
     const urlParams = new URLSearchParams(window.location.search);
     this.disablePhoneInference = urlParams.get('detect') === 'desktop';
 
@@ -186,9 +186,10 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 6. Socket Events & Room Join (N05) ────────────────────────────
+  // ── 6. Socket Events & Room Join (N05, H3, H9, N20) ───────────────
   setupSocketEvents() {
     this.socket.on('connect', () => {
+      this.clearError();
       if (this.roomCode && this.phoneToken) {
         this.socket.emit('join-room', {
           roomCode: this.roomCode,
@@ -200,6 +201,7 @@ class PhoneCameraApp {
 
     this.socket.on('connect_error', () => {
       this.updateStatusBadge('disconnected');
+      this.showConnectionError();
     });
 
     this.socket.on('room-joined', (data) => {
@@ -214,6 +216,24 @@ class PhoneCameraApp {
       this.updateStatusBadge('disconnected');
     });
 
+    // Real-time detection mode synchronization from desktop (H3)
+    this.socket.on('detect-mode', async (data) => {
+      this.disablePhoneInference = (data?.mode === 'desktop');
+      if (this.disablePhoneInference) {
+        this.stopDetectionLoop();
+        if (this.overlayCtx && this.overlayCanvas) {
+          this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+        }
+      } else {
+        if (!this.detector.modelLoaded) {
+          await this.initDetector();
+        }
+        if (this.localStream) {
+          this.startDetectionLoop();
+        }
+      }
+    });
+
     this.socket.on('room-closed', (data) => {
       this.showError(data?.reason || 'Session expired. Please scan a fresh QR code from the desktop.');
       this.dispose();
@@ -222,6 +242,34 @@ class PhoneCameraApp {
     this.socket.on('error-message', (err) => {
       this.showError(err.error || err.message || 'Access denied.');
     });
+  }
+
+  showConnectionError() {
+    const card = document.getElementById('errorCard');
+    if (!card) return;
+
+    card.innerHTML = '';
+    const textSpan = document.createElement('span');
+    textSpan.textContent = 'Signaling server disconnected. ';
+
+    const retryBtn = document.createElement('button');
+    retryBtn.textContent = 'Reconnect';
+    retryBtn.style.cssText = 'margin-left:8px;padding:2px 8px;cursor:pointer;border-radius:4px;border:none;background:#ff6b6b;color:#fff;font-weight:600;';
+    retryBtn.addEventListener('click', () => {
+      this.socket.connect();
+    });
+
+    card.appendChild(textSpan);
+    card.appendChild(retryBtn);
+    card.style.display = 'block';
+  }
+
+  clearError() {
+    const card = document.getElementById('errorCard');
+    if (card) {
+      card.style.display = 'none';
+      card.innerHTML = '';
+    }
   }
 
   // ── 7. Camera Initialization & Video Flow ─────────────────────────
@@ -234,7 +282,7 @@ class PhoneCameraApp {
     if (startBtn) startBtn.disabled = true;
 
     try {
-      const constraints = this.getConstraints();
+      const constraints = window.WebRTCUtils.getCameraConstraints(this.facingMode, this.isHD);
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
       const video = document.getElementById('localVideo');
@@ -261,17 +309,6 @@ class PhoneCameraApp {
     }
   }
 
-  getConstraints() {
-    return {
-      audio: false,
-      video: {
-        facingMode: this.facingMode,
-        width: { ideal: this.isHD ? 1280 : 640 },
-        height: { ideal: this.isHD ? 720 : 480 }
-      }
-    };
-  }
-
   formatCameraError(err) {
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
       return 'Camera permission was denied. Please allow camera access in browser settings.';
@@ -293,17 +330,10 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 8. Flip Camera with Safe Track Transition (G14, R15) ─────────
+  // ── 8. Flip Camera with Safe Track Transition (G14, H7, R15) ─────
   async toggleCamera() {
     const targetFacing = this.facingMode === 'user' ? 'environment' : 'user';
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: targetFacing,
-        width: { ideal: this.isHD ? 1280 : 640 },
-        height: { ideal: this.isHD ? 720 : 480 }
-      }
-    };
+    const constraints = window.WebRTCUtils.getCameraConstraints(targetFacing, this.isHD);
 
     try {
       // 1. Acquire new stream FIRST before stopping previous tracks (G14)
@@ -338,10 +368,14 @@ class PhoneCameraApp {
         .find((s) => s.track && s.track.kind === 'video');
 
       if (sender && newVideoTrack) {
-        await sender.replaceTrack(newVideoTrack);
+        try {
+          await sender.replaceTrack(newVideoTrack);
+        } catch {
+          // Handled gracefully (H7)
+        }
       }
     } catch (err) {
-      // Safe fallback: keep existing stream intact (G14)
+      // Safe fallback: keep existing stream intact (G14, H7)
       this.showError(`Failed to switch camera: ${err.message || 'Camera unavailable'}`);
     }
   }
@@ -368,7 +402,7 @@ class PhoneCameraApp {
     }
   }
 
-  // ── 9. Detection Loop (Single-sided Mobile Inference, N21) ────────
+  // ── 9. Detection Loop (Single-sided Mobile Inference, N21, H8, N35) ──
   startDetectionLoop() {
     if (this.detectionTimer || this.disablePhoneInference) return;
 
@@ -381,18 +415,27 @@ class PhoneCameraApp {
         if (video && video.readyState >= 2 && this.detector.modelLoaded) {
           const captureTs = Date.now();
           const detections = await this.detector.detect(video);
-          const inferenceTs = Date.now();
+          const inferenceDuration = Date.now() - captureTs;
 
-          this.lastLatency = inferenceTs - captureTs;
+          this.lastLatency = inferenceDuration;
           this.activeObjects = detections.length;
           this.frameCount++;
 
-          this.drawPhoneOverlays(detections);
+          // Draw on phone canvas using shared renderer (H8)
+          window.WebRTCUtils.drawBoundingBoxes(
+            this.overlayCtx,
+            this.overlayCanvas,
+            video,
+            detections,
+            {
+              fitMode: 'cover',
+              isMirrored: this.facingMode === 'user'
+            }
+          );
 
+          // Relay clean payload to desktop (N35)
           this.socket.emit('detection-result', {
-            frame_id: `frame_${captureTs}`,
             capture_ts: captureTs,
-            inference_ts: inferenceTs,
             detections
           });
         }
@@ -409,56 +452,6 @@ class PhoneCameraApp {
       clearInterval(this.detectionTimer);
       this.detectionTimer = null;
     }
-  }
-
-  drawPhoneOverlays(detections) {
-    if (!this.overlayCtx || !this.overlayCanvas) return;
-
-    const width = this.overlayCanvas.width / (window.devicePixelRatio || 1);
-    const height = this.overlayCanvas.height / (window.devicePixelRatio || 1);
-    const video = document.getElementById('localVideo');
-
-    this.overlayCtx.clearRect(0, 0, width, height);
-    if (!detections || detections.length === 0) return;
-
-    const fitRect = window.WebRTCUtils.objectFitRect(
-      width,
-      height,
-      video?.videoWidth || width,
-      video?.videoHeight || height,
-      'cover'
-    );
-
-    const palette = ['#51cf66', '#339af0', '#fcc419', '#ff6b6b', '#cc5de8'];
-
-    detections.forEach((det, idx) => {
-      const color = palette[idx % palette.length];
-      let boxX = fitRect.x + det.xmin * fitRect.width;
-      const boxY = fitRect.y + det.ymin * fitRect.height;
-      const boxW = (det.xmax - det.xmin) * fitRect.width;
-      const boxH = (det.ymax - det.ymin) * fitRect.height;
-
-      if (this.facingMode === 'user') {
-        boxX = width - (boxX + boxW);
-      }
-
-      this.overlayCtx.strokeStyle = color;
-      this.overlayCtx.lineWidth = 2.5;
-      this.overlayCtx.strokeRect(boxX, boxY, boxW, boxH);
-
-      const label = `${det.label} ${Math.round(det.score * 100)}%`;
-      this.overlayCtx.font = '700 11px Inter, sans-serif';
-      const textMetrics = this.overlayCtx.measureText(label);
-      const tagH = 18;
-      const tagW = textMetrics.width + 10;
-      const tagY = boxY > tagH + 2 ? boxY - tagH - 2 : boxY + 2;
-
-      this.overlayCtx.fillStyle = color;
-      this.overlayCtx.fillRect(boxX, tagY, tagW, tagH);
-
-      this.overlayCtx.fillStyle = '#fff';
-      this.overlayCtx.fillText(label, boxX + 5, tagY + 13);
-    });
   }
 
   // ── 10. Metrics HUD Loop (R15 Accuracy in Desktop Mode) ───────────

@@ -47,6 +47,105 @@ function objectFitRect(containerWidth, containerHeight, videoWidth, videoHeight,
 }
 
 /**
+ * Standard camera constraints builder (H8 deduplication)
+ */
+function getCameraConstraints(facingMode = 'environment', isHD = false) {
+  return {
+    audio: false,
+    video: {
+      facingMode,
+      width: { ideal: isHD ? 1280 : 640 },
+      height: { ideal: isHD ? 720 : 480 }
+    }
+  };
+}
+
+/**
+ * Shared canvas bounding box & label tag renderer (H8 deduplication)
+ */
+function drawBoundingBoxes(ctx, canvas, video, detections, options = {}) {
+  if (!ctx || !canvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width / dpr;
+  const height = canvas.height / dpr;
+  const fitMode = options.fitMode || 'contain';
+  const isMirrored = !!options.isMirrored;
+  const alpha = typeof options.alpha === 'number' ? options.alpha : 1.0;
+
+  ctx.clearRect(0, 0, width, height);
+  if (!detections || detections.length === 0) return;
+
+  const fitRect = objectFitRect(
+    width,
+    height,
+    video?.videoWidth || width,
+    video?.videoHeight || height,
+    fitMode
+  );
+
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  const palette = ['#51cf66', '#339af0', '#fcc419', '#ff6b6b', '#cc5de8', '#20c997', '#ff922b'];
+
+  detections.forEach((det, idx) => {
+    const color = palette[idx % palette.length];
+    let boxX = fitRect.x + det.xmin * fitRect.width;
+    const boxY = fitRect.y + det.ymin * fitRect.height;
+    const boxW = (det.xmax - det.xmin) * fitRect.width;
+    const boxH = (det.ymax - det.ymin) * fitRect.height;
+
+    if (isMirrored) {
+      boxX = width - (boxX + boxW);
+    }
+
+    // Bounding Box
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+    // Corner brackets
+    const cornerLen = Math.min(boxW, boxH) * 0.18;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(boxX, boxY + cornerLen);
+    ctx.lineTo(boxX, boxY);
+    ctx.lineTo(boxX + cornerLen, boxY);
+    ctx.moveTo(boxX + boxW - cornerLen, boxY);
+    ctx.lineTo(boxX + boxW);
+    ctx.lineTo(boxX + boxW, boxY + cornerLen);
+    ctx.moveTo(boxX, boxY + boxH - cornerLen);
+    ctx.lineTo(boxX, boxY + boxH);
+    ctx.lineTo(boxX + cornerLen, boxY + boxH);
+    ctx.moveTo(boxX + boxW - cornerLen, boxY + boxH);
+    ctx.lineTo(boxX + boxW);
+    ctx.lineTo(boxX + boxW, boxY + boxH - cornerLen);
+    ctx.stroke();
+
+    // Label Tag
+    const labelText = `${det.label} ${Math.round(det.score * 100)}%`;
+    ctx.font = '600 12px Inter, sans-serif';
+    const textMetrics = ctx.measureText(labelText);
+    const tagH = 20;
+    const tagW = textMetrics.width + 12;
+    const tagY = boxY > tagH + 4 ? boxY - tagH - 3 : boxY + 3;
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(boxX, tagY, tagW, tagH, 4);
+    } else {
+      ctx.rect(boxX, tagY, tagW, tagH);
+    }
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(labelText, boxX + 6, tagY + 14);
+  });
+
+  ctx.globalAlpha = 1.0;
+}
+
+/**
  * Buffer ICE candidates that arrive before setRemoteDescription has completed (F2)
  */
 class IceCandidateQueue {
@@ -327,6 +426,8 @@ function showToast(message, type = 'info', durationMs = 3500) {
 // Global namespace
 window.WebRTCUtils = {
   objectFitRect,
+  getCameraConstraints,
+  drawBoundingBoxes,
   IceCandidateQueue,
   PerfectNegotiator,
   fetchIceConfig,

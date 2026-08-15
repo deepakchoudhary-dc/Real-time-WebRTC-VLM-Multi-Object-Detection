@@ -10,83 +10,70 @@ class ObjectDetector {
   constructor(options = {}) {
     this.model = null;
     this.modelLoaded = false;
-    this.isLoading = false;
+    this.loadingPromise = null;
     this.confidenceThreshold = options.confidenceThreshold || 0.45;
     this.maxDetections = options.maxDetections || 20;
-    this.backend = 'webgl';
-    this.lastInferenceDuration = 0;
   }
 
   /**
-   * Load the COCO-SSD model (supports local self-hosted model or CDN fallback)
+   * Load the COCO-SSD model (supports in-flight promise deduplication, H6)
    * @param {function} onProgress - Progress reporting callback (0-100)
    * @returns {Promise<boolean>}
    */
   async loadModel(onProgress) {
-    if (this.modelLoaded) return true;
-    if (this.isLoading) return false;
-
-    this.isLoading = true;
-
-    try {
-      if (onProgress) onProgress(15);
-
-      if (typeof tf === 'undefined') {
-        throw new Error('TensorFlow.js not available. Check script imports.');
-      }
-      if (typeof cocoSsd === 'undefined') {
-        throw new Error('COCO-SSD library not available. Check script imports.');
-      }
-
-      if (onProgress) onProgress(35);
-
-      // Initialize backend (WebGL > WASM > CPU)
-      try {
-        await tf.setBackend('webgl');
-        await tf.ready();
-        this.backend = 'webgl';
-      } catch (err) {
-        console.warn('WebGL backend unavailable, trying WASM:', err);
-        try {
-          await tf.setBackend('wasm');
-          await tf.ready();
-          this.backend = 'wasm';
-        } catch {
-          await tf.setBackend('cpu');
-          await tf.ready();
-          this.backend = 'cpu';
-        }
-      }
-
-      if (onProgress) onProgress(60);
-
-      // Load model using lite_mobilenet_v2
-      const loadOptions = {
-        base: 'lite_mobilenet_v2'
-      };
-
-      // Probe local self-hosted model
-      try {
-        const checkLocal = await fetch('/vendor/models/ssdlite_mobilenet_v2/model.json', { method: 'HEAD' });
-        if (checkLocal.ok) {
-          loadOptions.modelUrl = '/vendor/models/ssdlite_mobilenet_v2/model.json';
-        }
-      } catch {
-        // Fallback to default CDN
-      }
-
-      this.model = await cocoSsd.load(loadOptions);
-
-      if (onProgress) onProgress(100);
-
-      this.modelLoaded = true;
-      this.isLoading = false;
-      return true;
-    } catch (error) {
-      console.error('Failed to load COCO-SSD detector:', error);
-      this.isLoading = false;
-      return false;
+    if (this.modelLoaded && this.model) return true;
+    if (this.loadingPromise) {
+      return this.loadingPromise;
     }
+
+    this.loadingPromise = (async () => {
+      try {
+        if (onProgress) onProgress(15);
+
+        if (typeof tf === 'undefined') {
+          throw new Error('TensorFlow.js not available.');
+        }
+        if (typeof cocoSsd === 'undefined') {
+          throw new Error('COCO-SSD library not available.');
+        }
+
+        if (onProgress) onProgress(35);
+
+        // Initialize backend (WebGL > WASM > CPU)
+        try {
+          await tf.setBackend('webgl');
+          await tf.ready();
+        } catch {
+          try {
+            await tf.setBackend('wasm');
+            await tf.ready();
+          } catch {
+            await tf.setBackend('cpu');
+            await tf.ready();
+          }
+        }
+
+        if (onProgress) onProgress(60);
+
+        const loadOptions = {
+          base: 'lite_mobilenet_v2'
+        };
+
+        this.model = await cocoSsd.load(loadOptions);
+
+        if (onProgress) onProgress(100);
+
+        this.modelLoaded = true;
+        return true;
+      } catch {
+        this.modelLoaded = false;
+        return false;
+      } finally {
+        this.loadingPromise = null;
+      }
+    })();
+
+    return this.loadingPromise;
   }
 
   /**
@@ -106,13 +93,11 @@ class ObjectDetector {
     }
 
     try {
-      const startTime = performance.now();
       const predictions = await this.model.detect(
         source,
         this.maxDetections,
         this.confidenceThreshold
       );
-      this.lastInferenceDuration = performance.now() - startTime;
 
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
@@ -129,23 +114,23 @@ class ObjectDetector {
       }));
 
       return detections;
-    } catch (error) {
-      console.error('Detection inference error:', error);
+    } catch {
       return [];
     }
   }
 
-  get inferenceDuration() {
-    return Math.round(this.lastInferenceDuration);
-  }
-
   dispose() {
+    this.loadingPromise = null;
     if (this.model) {
       this.model = null;
       this.modelLoaded = false;
     }
     if (typeof tf !== 'undefined' && tf.disposeVariables) {
-      tf.disposeVariables();
+      try {
+        tf.disposeVariables();
+      } catch {
+        // Safe disposal
+      }
     }
   }
 }

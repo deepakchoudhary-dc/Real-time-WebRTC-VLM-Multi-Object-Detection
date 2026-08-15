@@ -21,7 +21,7 @@ const COCO_LABELS = new Set([
 ]);
 
 /**
- * Sanitize and validate detection result payload (G09, R01)
+ * Sanitize and validate detection result payload (N35 clean)
  */
 function validateDetectionResult(payload) {
   if (!payload || typeof payload !== 'object') return null;
@@ -66,14 +66,8 @@ function validateDetectionResult(payload) {
     ? payload.capture_ts
     : Date.now();
 
-  const inferenceTs = typeof payload.inference_ts === 'number' && Number.isFinite(payload.inference_ts)
-    ? payload.inference_ts
-    : Date.now();
-
   return {
-    frame_id: String(payload.frame_id || '').substring(0, 64),
     capture_ts: captureTs,
-    inference_ts: inferenceTs,
     detections: validDetections
   };
 }
@@ -129,7 +123,7 @@ function attachSignaling(io) {
       next();
     });
 
-    // ── 1. Room Joining (N05, N09, G08, R07) ─────────────────────────
+    // ── 1. Room Joining (N05, N09, G08, R07, P19) ────────────────────
     socket.on('join-room', (payload, callback) => {
       if (!payload || typeof payload !== 'object') {
         const err = { error: 'Invalid join-room payload.' };
@@ -139,12 +133,7 @@ function attachSignaling(io) {
       }
 
       const { roomCode, role, token } = payload;
-      const isSocketAlive = (id) => {
-        const socketsMap = io.sockets?.sockets || io.sockets;
-        return socketsMap ? (socketsMap.has ? socketsMap.has(id) : !!socketsMap.get?.(id)) : false;
-      };
-
-      const result = roomStore.joinRoom(roomCode, role, socket.id, token, isSocketAlive);
+      const result = roomStore.joinRoom(roomCode, role, socket.id, token);
 
       if (!result.success) {
         logger.warn(`Failed join attempt: ${socket.id} -> ${logger.maskCode(roomCode)} (${result.error})`);
@@ -157,7 +146,7 @@ function attachSignaling(io) {
       const { room, peerSocketId, bufferedOffer, previousLeave } = result;
       logger.info(`Peer joined room: ${logger.maskCode(room.code)} as ${role} (id: ${socket.id})`);
 
-      // If this socket was previously in another room, notify previous peer (R07)
+      // If this socket was previously in a different room, notify previous peer (R07)
       if (previousLeave && previousLeave.otherPeerId) {
         io.to(previousLeave.otherPeerId).emit('peer-left', { role: previousLeave.role });
       }
@@ -184,7 +173,18 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 2. WebRTC SDP Offer (Bidirectional Buffering, N10) ────────────
+    // ── 2. Detection Mode Propagation (H3) ───────────────────────────
+    socket.on('detect-mode', (payload) => {
+      const roomInfo = roomStore.getRoomBySocketId(socket.id);
+      if (!roomInfo) return;
+
+      const peerSocketId = roomStore.getPeerSocketId(socket.id);
+      if (peerSocketId && payload && typeof payload.mode === 'string') {
+        io.to(peerSocketId).emit('detect-mode', { mode: payload.mode });
+      }
+    });
+
+    // ── 3. WebRTC SDP Offer (Bidirectional Buffering, N10) ────────────
     socket.on('offer', (offerData) => {
       const validSdp = validateSdp(offerData);
       if (!validSdp) return;
@@ -208,7 +208,7 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 3. WebRTC SDP Answer (Point-to-peer relay) ───────────────────
+    // ── 4. WebRTC SDP Answer (Point-to-peer relay) ───────────────────
     socket.on('answer', (answerData) => {
       const validSdp = validateSdp(answerData);
       if (!validSdp) return;
@@ -224,7 +224,7 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 4. WebRTC ICE Candidate (Bi-directional) ─────────────────────
+    // ── 5. WebRTC ICE Candidate (Bi-directional) ─────────────────────
     socket.on('ice-candidate', (candidateData) => {
       const validCandidate = validateIceCandidate(candidateData);
       if (!validCandidate) return;
@@ -240,11 +240,11 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 5. Detection Result Relay (Phone -> Desktop, N15) ─────────────
+    // ── 6. Detection Result Relay (Phone -> Desktop, N15, N35) ────────
     socket.on('detection-result', (resultData) => {
       const roomInfo = roomStore.getRoomBySocketId(socket.id);
       if (!roomInfo || roomInfo.meta.role !== 'phone') {
-        return; // Only phone is authorized to push detection-results
+        return;
       }
 
       const validResult = validateDetectionResult(resultData);
@@ -259,11 +259,11 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 6. Metrics Reporting from Client (Desktop -> Server, R02) ────
+    // ── 7. Metrics Reporting from Client (Desktop -> Server, R02) ────
     socket.on('metrics-report', (report) => {
       const roomInfo = roomStore.getRoomBySocketId(socket.id);
       if (!roomInfo || roomInfo.meta.role !== 'desktop') {
-        return; // Only desktop reports canonical E2E latency measurements
+        return;
       }
 
       if (report && typeof report.latency === 'number' && Number.isFinite(report.latency)) {
@@ -271,7 +271,7 @@ function attachSignaling(io) {
       }
     });
 
-    // ── 7. Disconnect Handling ───────────────────────────────────────
+    // ── 8. Disconnect Handling ───────────────────────────────────────
     socket.on('disconnect', (reason) => {
       logger.debug(`Socket disconnected: ${socket.id} (${reason})`);
       const leaveResult = roomStore.leaveRoom(socket.id);
