@@ -1,692 +1,613 @@
 /**
- * Desktop Application — WebRTC Object Detection
- *
- * Receives video stream from phone via WebRTC,
- * runs COCO-SSD detection locally on the desktop browser,
- * and draws bounding box overlays on a canvas.
+ * Desktop Application — WebRTC Object Detection Hub
+ * 
+ * Handles P2P WebRTC video stream reception, Perfect Negotiation,
+ * single-sided AI bounding box overlays, and live performance metrics.
  */
-class WebRTCObjectDetection {
+'use strict';
+
+class DesktopApp {
   constructor() {
-    this.socket = io();
+    this.socket = io({
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000
+    });
+
     this.peerConnection = null;
+    this.negotiator = null;
     this.remoteStream = null;
     this.overlayCanvas = null;
     this.overlayCtx = null;
+    this.resizeObserver = null;
+
     this.roomCode = null;
-    this.detector = window.objectDetector;
+    this.roomToken = null;
+    this.csrfToken = null;
 
-    // Detection state
-    this.isDetecting = false;
-    this.detectionLoop = null;
-    this.detectionInterval = 150; // ms between detections (~7 FPS detection)
+    // AI Detector (optional desktop fallback detection)
+    this.detector = new window.ObjectDetector();
+    this.detectOnDesktop = new URLSearchParams(window.location.search).get('detect') === 'desktop';
+    this.desktopDetectionLoop = null;
 
-    // Performance tracking
+    // Metrics state (Single-source truth, fixes L25 double count)
+    this.processedFrames = 0;
+    this.fpsCounter = 0;
+    this.currentFps = 0;
+    this.lastFpsTimestamp = Date.now();
     this.latencyHistory = [];
     this.fpsHistory = [];
-    this.maxHistoryLength = 60;
+    this.maxHistory = 50;
 
-    this.metrics = {
-      frameCount: 0,
-      processedCount: 0,
-      lastFpsUpdate: Date.now(),
-      fpsCounter: 0,
-      currentFps: 0,
-    };
-
-    // Detection display
+    // Detection display cache & fadeout
     this.lastDetections = [];
-    this.lastDetectionTime = 0;
-    this.detectionDisplayDuration = 2500;
-    this.detectionHistory = [];
+    this.lastDetectionTs = 0;
+    this.displayDurationMs = 2000;
+    this.detectionFeed = [];
+    this.rAfHandle = null;
 
-    // Performance chart
-    this.performanceChart = null;
+    // Chart state
+    this.chartCanvas = null;
+    this.chartCtx = null;
+    this.showChart = false;
 
     this.init();
   }
 
   async init() {
+    this.setupDOM();
     this.setupCanvas();
-    this.setupWebRTC();
     this.setupSocketEvents();
-    this.generateRoom();
-    this.initPerformanceChart();
-    this.startMetricsUpdate();
+    await this.initWebRTC();
+    await this.fetchOrRestoreRoom();
 
-    // Load AI model with progress
-    this.showModelLoadingUI();
-    const loaded = await this.detector.loadModel((progress) => {
-      this.updateModelProgress(progress);
-    });
-
-    if (loaded) {
-      this.hideModelLoadingUI();
-    } else {
-      this.showModelError();
+    if (this.detectOnDesktop) {
+      await this.initDesktopDetector();
     }
   }
 
-  // ── Model Loading UI ──
+  // ── 1. DOM & Event Wiring ─────────────────────────────────────────
+  setupDOM() {
+    document.getElementById('benchmarkBtn')?.addEventListener('click', () => this.runBenchmark());
+    document.getElementById('performanceBtn')?.addEventListener('click', () => this.togglePerformanceChart());
+    document.getElementById('downloadBtn')?.addEventListener('click', () => this.downloadMetrics());
+    document.getElementById('resetBtn')?.addEventListener('click', () => this.resetMetrics());
 
-  showModelLoadingUI() {
-    const el = document.getElementById('modelStatus');
-    if (el) {
-      el.style.display = 'block';
-      el.textContent = '🧠 Loading AI model...';
-    }
+    // Pagehide / Visibility cleanup (L47)
+    window.addEventListener('pagehide', () => this.dispose());
   }
 
-  updateModelProgress(progress) {
-    const el = document.getElementById('modelStatus');
-    if (el) {
-      el.textContent = `🧠 Loading AI model... ${progress}%`;
-    }
-  }
-
-  hideModelLoadingUI() {
-    const el = document.getElementById('modelStatus');
-    if (el) {
-      el.textContent = '✅ AI model ready';
-      setTimeout(() => {
-        el.style.display = 'none';
-      }, 2000);
-    }
-  }
-
-  showModelError() {
-    const el = document.getElementById('modelStatus');
-    if (el) {
-      el.textContent = '❌ Failed to load AI model. Refresh to retry.';
-      el.style.background = 'rgba(255, 71, 87, 0.4)';
-    }
-  }
-
-  // ── Canvas Setup ──
-
+  // ── 2. Canvas & Sizing ────────────────────────────────────────────
   setupCanvas() {
     this.overlayCanvas = document.getElementById('overlayCanvas');
     this.overlayCtx = this.overlayCanvas.getContext('2d');
+
+    const videoWrapper = document.getElementById('videoContainer');
+    if (videoWrapper && window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
+      this.resizeObserver.observe(videoWrapper);
+    }
   }
 
   resizeCanvas() {
     const video = document.getElementById('remoteVideo');
+    if (!video || !this.overlayCanvas) return;
+
     const rect = video.getBoundingClientRect();
-
-    this.overlayCanvas.style.width = rect.width + 'px';
-    this.overlayCanvas.style.height = rect.height + 'px';
-
     const dpr = window.devicePixelRatio || 1;
+
     this.overlayCanvas.width = rect.width * dpr;
     this.overlayCanvas.height = rect.height * dpr;
     this.overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  // ── Room & QR Code ──
+  // ── 3. WebRTC Setup & Perfect Negotiation ─────────────────────────
+  async initWebRTC() {
+    const iceConfig = await window.WebRTCUtils.fetchIceConfig();
+    this.peerConnection = new RTCPeerConnection(iceConfig);
 
-  async generateRoom() {
+    // Desktop is the polite peer in Perfect Negotiation
+    this.negotiator = new window.WebRTCUtils.PerfectNegotiator(
+      this.peerConnection,
+      this.socket,
+      { isPolite: true }
+    );
+
+    this.peerConnection.ontrack = (event) => {
+      console.log('📺 Received remote video track');
+      this.remoteStream = event.streams[0];
+      const video = document.getElementById('remoteVideo');
+      const loader = document.getElementById('loadingIndicator');
+
+      if (video) {
+        video.srcObject = this.remoteStream;
+        video.style.display = 'block';
+        video.onloadedmetadata = () => {
+          this.resizeCanvas();
+          this.startRenderLoop();
+          if (this.detectOnDesktop) {
+            this.startDesktopDetection();
+          }
+        };
+      }
+      if (loader) loader.style.display = 'none';
+    };
+
+    this.peerConnection.onconnectionstatechange = () => {
+      const state = this.peerConnection.connectionState;
+      console.log(`WebRTC connection state: ${state}`);
+      this.updateConnectionBadge(state);
+    };
+  }
+
+  // ── 4. Room & QR Code Management ──────────────────────────────────
+  async fetchOrRestoreRoom() {
     try {
-      const response = await fetch('/api/qr');
-      const data = await response.json();
+      const res = await fetch('/api/qr');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
 
       this.roomCode = data.roomCode;
+      this.roomToken = data.token;
+      this.csrfToken = data.csrfToken;
+
+      // Display QR
+      const qrEl = document.getElementById('qrCodeContainer');
+      if (qrEl) {
+        qrEl.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = data.qr;
+        img.alt = 'Scan with mobile camera to connect';
+        qrEl.appendChild(img);
+      }
+
+      const roomEl = document.getElementById('roomCodeDisplay');
+      if (roomEl) roomEl.textContent = this.roomCode;
+
+      const urlEl = document.getElementById('connectionUrl');
+      if (urlEl) urlEl.textContent = data.url;
 
       // Join room as desktop
       this.socket.emit('join-room', {
         roomCode: this.roomCode,
         role: 'desktop',
+        token: this.roomToken
       });
-
-      // Display QR code
-      const qrEl = document.getElementById('qrCode');
-      if (qrEl) {
-        const img = document.createElement('img');
-        img.src = data.qr;
-        img.alt = 'Scan to connect phone';
-        qrEl.innerHTML = '';
-        qrEl.appendChild(img);
-      }
-
-      const urlEl = document.getElementById('connectionUrl');
-      if (urlEl) {
-        urlEl.textContent = data.url;
-      }
-
-      const roomEl = document.getElementById('roomCode');
-      if (roomEl) {
-        roomEl.textContent = this.roomCode;
-      }
-    } catch (error) {
-      console.error('Failed to generate room:', error);
+    } catch (err) {
+      console.error('Failed to initialize room:', err);
+      window.WebRTCUtils.showToast('Failed to initialize session room. Check server connection.', 'error');
     }
   }
 
-  // ── WebRTC ──
-
-  setupWebRTC() {
-    const config = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-      ],
-    };
-
-    this.peerConnection = new RTCPeerConnection(config);
-
-    this.peerConnection.ontrack = (event) => {
-      console.log('📺 Received remote video stream');
-      this.remoteStream = event.streams[0];
-      this.setupRemoteVideo();
-    };
-
-    this.peerConnection.onconnectionstatechange = () => {
-      const state = this.peerConnection.connectionState;
-      console.log('🔗 Connection state:', state);
-      this.updateConnectionStatus(state);
-    };
-
-    this.peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        this.socket.emit('ice-candidate', event.candidate);
-      }
-    };
-  }
-
-  // ── Socket Events ──
-
+  // ── 5. Socket Events ──────────────────────────────────────────────
   setupSocketEvents() {
-    this.socket.on('offer', async (offer) => {
-      console.log('📞 Received offer from phone');
-      try {
-        await this.peerConnection.setRemoteDescription(
-          new RTCSessionDescription(offer)
-        );
-        const answer = await this.peerConnection.createAnswer();
-        await this.peerConnection.setLocalDescription(answer);
-        this.socket.emit('answer', answer);
-      } catch (error) {
-        console.error('Error handling offer:', error);
-      }
-    });
-
-    this.socket.on('ice-candidate', async (candidate) => {
-      try {
-        await this.peerConnection.addIceCandidate(
-          new RTCIceCandidate(candidate)
-        );
-      } catch (error) {
-        console.error('Error adding ICE candidate:', error);
-      }
-    });
-
-    // Receive detection results from phone
-    this.socket.on('detection-result', (result) => {
-      if (result && Array.isArray(result.detections)) {
-        this.handleDetectionResult(result);
+    this.socket.on('connect', () => {
+      console.log('Socket connected:', this.socket.id);
+      if (this.roomCode) {
+        // Idempotent rejoin on socket reconnection (F5, L49)
+        this.socket.emit('join-room', {
+          roomCode: this.roomCode,
+          role: 'desktop',
+          token: this.roomToken
+        });
       }
     });
 
     this.socket.on('peer-joined', (data) => {
-      console.log(`📱 ${data.role} joined the room`);
+      console.log(`📱 Mobile peer joined room: ${data.role}`);
+      this.updateConnectionBadge('connecting');
+      window.WebRTCUtils.showToast('Mobile camera connected!', 'success');
     });
 
-    this.socket.on('peer-left', (data) => {
-      console.log(`📱 ${data.role} left the room`);
-      this.updateConnectionStatus('disconnected');
+    this.socket.on('peer-left', () => {
+      console.log('📱 Mobile peer left');
+      this.updateConnectionBadge('disconnected');
+      window.WebRTCUtils.showToast('Mobile camera disconnected.', 'info');
     });
-  }
 
-  // ── Remote Video ──
-
-  setupRemoteVideo() {
-    const video = document.getElementById('remoteVideo');
-    const loading = document.getElementById('loadingIndicator');
-
-    video.srcObject = this.remoteStream;
-    video.style.display = 'block';
-    if (loading) loading.style.display = 'none';
-
-    video.onloadedmetadata = () => {
-      this.resizeCanvas();
-      this.startDetectionLoop();
-      this.startPersistentDisplay();
-    };
-
-    video.onresize = () => this.resizeCanvas();
-  }
-
-  // ── Detection Loop (runs on desktop) ──
-
-  startDetectionLoop() {
-    if (this.detectionLoop) return;
-
-    const runDetection = async () => {
-      if (this.isDetecting) return;
-      this.isDetecting = true;
-
-      try {
-        const video = document.getElementById('remoteVideo');
-        if (video && video.readyState >= 2 && this.detector.modelLoaded) {
-          const captureTs = Date.now();
-          const detections = await this.detector.detect(video);
-
-          this.metrics.processedCount++;
-          this.metrics.fpsCounter++;
-
-          const result = {
-            capture_ts: captureTs,
-            inference_ts: Date.now(),
-            detections,
-          };
-
-          this.handleDetectionResult(result);
-        }
-      } catch (error) {
-        console.error('Detection loop error:', error);
-      } finally {
-        this.isDetecting = false;
+    // Relay of detection results from phone (Single-sided pipeline)
+    this.socket.on('detection-result', (result) => {
+      if (!this.detectOnDesktop && result && Array.isArray(result.detections)) {
+        this.handleDetectionFrame(result);
       }
-    };
+    });
 
-    this.detectionLoop = setInterval(runDetection, this.detectionInterval);
+    this.socket.on('error-message', (err) => {
+      console.warn('Server error message:', err.message || err.error);
+      window.WebRTCUtils.showToast(err.message || err.error, 'error');
+    });
   }
 
-  // ── Handle Detection Results ──
-
-  handleDetectionResult(result) {
+  // ── 6. Detection Processing & Rendering ───────────────────────────
+  handleDetectionFrame(result) {
     const now = Date.now();
-    const latency = result.inference_ts
-      ? result.inference_ts - result.capture_ts
-      : 0;
+    const latency = Math.max(0, now - (result.capture_ts || now));
 
-    // Update metrics
-    this.metrics.processedCount++;
-    this.metrics.fpsCounter++;
+    // Increment metrics ONCE per detection frame (L25 fix)
+    this.processedFrames++;
+    this.fpsCounter++;
 
-    // Track latency
+    this.lastDetections = result.detections || [];
+    this.lastDetectionTs = now;
+
+    // Track latency history
     this.latencyHistory.push(latency);
-    if (this.latencyHistory.length > this.maxHistoryLength) {
+    if (this.latencyHistory.length > this.maxHistory) {
       this.latencyHistory.shift();
     }
 
-    // Store detections for persistent display
-    if (result.detections && result.detections.length > 0) {
-      this.lastDetections = result.detections;
-      this.lastDetectionTime = now;
-    }
-
-    // Draw overlays
-    this.drawPersistentDetections();
-
-    // Update UI
-    this.updateDetectionList(result.detections || []);
-    this.updateLiveMetrics(latency, (result.detections || []).length);
+    // Update UI elements
+    this.updateMetricsUI(latency, this.lastDetections.length);
+    this.updateDetectionFeed(this.lastDetections);
   }
 
-  // ── Drawing ──
+  startRenderLoop() {
+    if (this.rAfHandle) return;
 
-  drawPersistentDetections() {
+    const render = () => {
+      this.drawDetections();
+      this.rAfHandle = requestAnimationFrame(render);
+    };
+    this.rAfHandle = requestAnimationFrame(render);
+  }
+
+  drawDetections() {
+    if (!this.overlayCanvas || !this.overlayCtx) return;
+
+    const video = document.getElementById('remoteVideo');
+    const width = this.overlayCanvas.width / (window.devicePixelRatio || 1);
+    const height = this.overlayCanvas.height / (window.devicePixelRatio || 1);
+
+    this.overlayCtx.clearRect(0, 0, width, height);
+
     const now = Date.now();
-    const elapsed = now - this.lastDetectionTime;
+    const elapsed = now - this.lastDetectionTs;
 
-    this.overlayCtx.clearRect(
-      0,
-      0,
-      this.overlayCanvas.width,
-      this.overlayCanvas.height
+    if (elapsed > this.displayDurationMs || this.lastDetections.length === 0) {
+      return;
+    }
+
+    // Calculate letterbox/pillarbox offset using objectFitRect (L42 fix)
+    const fitRect = window.WebRTCUtils.objectFitRect(
+      width,
+      height,
+      video?.videoWidth || width,
+      video?.videoHeight || height,
+      'contain'
     );
 
-    if (
-      elapsed < this.detectionDisplayDuration &&
-      this.lastDetections.length > 0
-    ) {
-      const fadeStart = this.detectionDisplayDuration - 500;
-      let opacity = 1.0;
-      if (elapsed > fadeStart) {
-        opacity = 1.0 - (elapsed - fadeStart) / 500;
-      }
-      this.drawDetections(this.lastDetections, opacity);
+    // Alpha fadeout
+    let alpha = 1.0;
+    const fadeWindow = 500;
+    if (elapsed > this.displayDurationMs - fadeWindow) {
+      alpha = 1.0 - (elapsed - (this.displayDurationMs - fadeWindow)) / fadeWindow;
     }
-  }
 
-  drawDetections(detections, opacity = 1.0) {
-    const rect = this.overlayCanvas.getBoundingClientRect();
-    this.overlayCtx.globalAlpha = opacity;
+    this.overlayCtx.globalAlpha = Math.max(0, Math.min(1, alpha));
 
-    // Color palette for different classes
-    const colors = [
-      '#ff6b6b', '#51cf66', '#339af0', '#fcc419',
-      '#cc5de8', '#20c997', '#ff922b', '#845ef7',
-      '#f06595', '#22b8cf', '#fab005', '#7950f2',
-    ];
+    const palette = ['#51cf66', '#339af0', '#fcc419', '#ff6b6b', '#cc5de8', '#20c997', '#ff922b'];
 
-    detections.forEach((det, i) => {
-      const color = colors[i % colors.length];
-      const x = det.xmin * rect.width;
-      const y = det.ymin * rect.height;
-      const w = (det.xmax - det.xmin) * rect.width;
-      const h = (det.ymax - det.ymin) * rect.height;
+    this.lastDetections.forEach((det, idx) => {
+      const color = palette[idx % palette.length];
+      const boxX = fitRect.x + det.xmin * fitRect.width;
+      const boxY = fitRect.y + det.ymin * fitRect.height;
+      const boxW = (det.xmax - det.xmin) * fitRect.width;
+      const boxH = (det.ymax - det.ymin) * fitRect.height;
 
-      // Bounding box
+      // Main rectangle
       this.overlayCtx.strokeStyle = color;
       this.overlayCtx.lineWidth = 2.5;
-      this.overlayCtx.strokeRect(x, y, w, h);
+      this.overlayCtx.strokeRect(boxX, boxY, boxW, boxH);
 
-      // Corner accents
-      const cornerLen = Math.min(w, h) * 0.15;
+      // Corner brackets for clean look
+      const cornerLen = Math.min(boxW, boxH) * 0.18;
       this.overlayCtx.lineWidth = 4;
-      // Top-left
       this.overlayCtx.beginPath();
-      this.overlayCtx.moveTo(x, y + cornerLen);
-      this.overlayCtx.lineTo(x, y);
-      this.overlayCtx.lineTo(x + cornerLen, y);
-      this.overlayCtx.stroke();
-      // Top-right
-      this.overlayCtx.beginPath();
-      this.overlayCtx.moveTo(x + w - cornerLen, y);
-      this.overlayCtx.lineTo(x + w, y);
-      this.overlayCtx.lineTo(x + w, y + cornerLen);
-      this.overlayCtx.stroke();
-      // Bottom-left
-      this.overlayCtx.beginPath();
-      this.overlayCtx.moveTo(x, y + h - cornerLen);
-      this.overlayCtx.lineTo(x, y + h);
-      this.overlayCtx.lineTo(x + cornerLen, y + h);
-      this.overlayCtx.stroke();
-      // Bottom-right
-      this.overlayCtx.beginPath();
-      this.overlayCtx.moveTo(x + w - cornerLen, y + h);
-      this.overlayCtx.lineTo(x + w, y + h);
-      this.overlayCtx.lineTo(x + w, y + h - cornerLen);
+      // Top Left
+      this.overlayCtx.moveTo(boxX, boxY + cornerLen);
+      this.overlayCtx.lineTo(boxX, boxY);
+      this.overlayCtx.lineTo(boxX + cornerLen, boxY);
+      // Top Right
+      this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY);
+      this.overlayCtx.lineTo(boxX + boxW, boxY);
+      this.overlayCtx.lineTo(boxX + boxW, boxY + cornerLen);
+      // Bottom Left
+      this.overlayCtx.moveTo(boxX, boxY + boxH - cornerLen);
+      this.overlayCtx.lineTo(boxX, boxY + boxH);
+      this.overlayCtx.lineTo(boxX + cornerLen, boxY + boxH);
+      // Bottom Right
+      this.overlayCtx.moveTo(boxX + boxW - cornerLen, boxY + boxH);
+      this.overlayCtx.lineTo(boxX + boxW, boxY + boxH);
+      this.overlayCtx.lineTo(boxX + boxW, boxY + boxH - cornerLen);
       this.overlayCtx.stroke();
 
-      // Label
-      const label = `${det.label} ${Math.round(det.score * 100)}%`;
-      this.overlayCtx.font = 'bold 13px Inter, Arial, sans-serif';
-      const tm = this.overlayCtx.measureText(label);
-      const labelH = 22;
-      const labelY = y > labelH + 4 ? y - labelH - 2 : y + 2;
+      // Label Tag
+      const labelText = `${det.label} ${Math.round(det.score * 100)}%`;
+      this.overlayCtx.font = '600 12px Inter, sans-serif';
+      const textMetrics = this.overlayCtx.measureText(labelText);
+      const tagH = 20;
+      const tagW = textMetrics.width + 12;
+      const tagY = boxY > tagH + 4 ? boxY - tagH - 3 : boxY + 3;
 
       this.overlayCtx.fillStyle = color;
       this.overlayCtx.beginPath();
-      this.roundRect(x, labelY, tm.width + 12, labelH, 4);
+      this.overlayCtx.roundRect ? this.overlayCtx.roundRect(boxX, tagY, tagW, tagH, 4) : this.overlayCtx.rect(boxX, tagY, tagW, tagH);
       this.overlayCtx.fill();
 
-      this.overlayCtx.fillStyle = '#fff';
-      this.overlayCtx.fillText(label, x + 6, labelY + 15);
+      this.overlayCtx.fillStyle = '#ffffff';
+      this.overlayCtx.fillText(labelText, boxX + 6, tagY + 14);
     });
 
     this.overlayCtx.globalAlpha = 1.0;
   }
 
-  roundRect(x, y, w, h, r) {
-    this.overlayCtx.moveTo(x + r, y);
-    this.overlayCtx.lineTo(x + w - r, y);
-    this.overlayCtx.quadraticCurveTo(x + w, y, x + w, y + r);
-    this.overlayCtx.lineTo(x + w, y + h - r);
-    this.overlayCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    this.overlayCtx.lineTo(x + r, y + h);
-    this.overlayCtx.quadraticCurveTo(x, y + h, x, y + h - r);
-    this.overlayCtx.lineTo(x, y + r);
-    this.overlayCtx.quadraticCurveTo(x, y, x + r, y);
+  // ── 7. Desktop Fallback Detection Loop ─────────────────────────────
+  async initDesktopDetector() {
+    const banner = document.getElementById('modelStatus');
+    if (banner) {
+      banner.style.display = 'block';
+      banner.textContent = '🧠 Loading desktop AI model...';
+    }
+
+    const ready = await this.detector.loadModel((pct) => {
+      if (banner) banner.textContent = `🧠 Loading AI model... ${pct}%`;
+    });
+
+    if (ready && banner) {
+      banner.textContent = '✅ AI model ready (Desktop Mode)';
+      setTimeout(() => { banner.style.display = 'none'; }, 2000);
+    }
   }
 
-  startPersistentDisplay() {
-    const update = () => {
-      this.drawPersistentDetections();
-      requestAnimationFrame(update);
-    };
-    requestAnimationFrame(update);
+  startDesktopDetection() {
+    if (this.desktopDetectionLoop) return;
+
+    this.desktopDetectionLoop = setInterval(async () => {
+      const video = document.getElementById('remoteVideo');
+      if (video && video.readyState >= 2 && this.detector.modelLoaded) {
+        const captureTs = Date.now();
+        const detections = await this.detector.detect(video);
+        const frame = {
+          capture_ts: captureTs,
+          inference_ts: Date.now(),
+          detections
+        };
+        this.handleDetectionFrame(frame);
+      }
+    }, 150);
   }
 
-  // ── Detection List UI ──
+  // ── 8. UI Updates & Live Metrics ──────────────────────────────────
+  updateMetricsUI(latency, objectCount) {
+    const latEl = document.getElementById('latencyMetric');
+    const objEl = document.getElementById('objectsMetric');
+    const procEl = document.getElementById('processedMetric');
 
-  updateDetectionList(detections) {
+    if (latEl) latEl.textContent = `${latency}ms`;
+    if (objEl) objEl.textContent = objectCount;
+    if (procEl) procEl.textContent = this.processedFrames;
+
+    const now = Date.now();
+    if (now - this.lastFpsTimestamp >= 1000) {
+      this.currentFps = this.fpsCounter;
+      this.fpsCounter = 0;
+      this.lastFpsTimestamp = now;
+
+      const fpsEl = document.getElementById('fpsMetric');
+      if (fpsEl) fpsEl.textContent = `${this.currentFps} fps`;
+
+      this.fpsHistory.push(this.currentFps);
+      if (this.fpsHistory.length > this.maxHistory) {
+        this.fpsHistory.shift();
+      }
+
+      if (this.showChart) {
+        this.renderChart();
+      }
+    }
+  }
+
+  updateDetectionFeed(detections) {
+    if (!detections || detections.length === 0) return;
     const now = Date.now();
 
     detections.forEach((d) => {
-      this.detectionHistory.push({
+      this.detectionFeed.unshift({
         label: d.label,
-        confidence: d.score,
-        timestamp: now,
+        score: d.score,
+        ts: now
       });
     });
 
-    // Keep last 10s
-    this.detectionHistory = this.detectionHistory.filter(
-      (d) => now - d.timestamp < 10_000
-    );
-
-    // Unique labels, newest first
-    const seen = new Set();
-    const unique = [];
-    for (const d of [...this.detectionHistory].reverse()) {
-      if (!seen.has(d.label)) {
-        seen.add(d.label);
-        unique.push(d);
-      }
-    }
+    // Keep recent 10 items
+    this.detectionFeed = this.detectionFeed.slice(0, 10);
 
     const listEl = document.getElementById('detectionList');
     if (!listEl) return;
 
-    if (unique.length === 0) {
-      listEl.textContent = '';
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color: #999; text-align: center; padding: 20px;';
-      empty.textContent = 'No recent detections';
-      listEl.appendChild(empty);
-    } else {
-      listEl.textContent = '';
-      unique.slice(0, 6).forEach((d) => {
-        const item = document.createElement('div');
-        item.className = 'detection-item';
-        item.textContent = `${d.label} — ${Math.round(d.confidence * 100)}%`;
-        listEl.appendChild(item);
-      });
-    }
+    listEl.innerHTML = '';
+    this.detectionFeed.slice(0, 5).forEach((item) => {
+      const chip = document.createElement('div');
+      chip.className = 'detection-chip';
+      chip.innerHTML = `<span>🏷️ ${item.label}</span><span>${Math.round(item.score * 100)}%</span>`;
+      listEl.appendChild(chip);
+    });
   }
 
-  // ── Metrics UI ──
-
-  updateLiveMetrics(latency, objectCount) {
-    const latencyEl = document.getElementById('latencyMetric');
-    const objectsEl = document.getElementById('objectsMetric');
-    if (latencyEl) latencyEl.textContent = `${latency}ms`;
-    if (objectsEl) objectsEl.textContent = objectCount;
-
-    const now = Date.now();
-    if (now - this.metrics.lastFpsUpdate >= 1000) {
-      const fps = this.metrics.fpsCounter;
-      const fpsEl = document.getElementById('fpsMetric');
-      const processedEl = document.getElementById('processedMetric');
-      if (fpsEl) fpsEl.textContent = `${fps} fps`;
-      if (processedEl) processedEl.textContent = this.metrics.processedCount;
-
-      this.fpsHistory.push(fps);
-      if (this.fpsHistory.length > this.maxHistoryLength) {
-        this.fpsHistory.shift();
-      }
-
-      this.metrics.currentFps = fps;
-      this.metrics.fpsCounter = 0;
-      this.metrics.lastFpsUpdate = now;
-
-      if (this.performanceChart) this.updatePerformanceChart();
-    }
-  }
-
-  updateConnectionStatus(state) {
+  updateConnectionBadge(state) {
     const el = document.getElementById('connectionStatus');
     if (!el) return;
 
     const map = {
-      connected: ['status-connected', '📱 Connected'],
+      connected: ['status-connected', '📱 Phone Connected'],
       connecting: ['status-connecting', '📱 Connecting...'],
+      disconnected: ['status-disconnected', '📱 Disconnected']
     };
-    const [cls, text] = map[state] || [
-      'status-disconnected',
-      '📱 Disconnected',
-    ];
-    el.className = `connection-status ${cls}`;
+
+    const [cls, text] = map[state] || map.disconnected;
+    el.className = `status-pill ${cls}`;
     el.textContent = text;
   }
 
-  // ── Performance Chart ──
+  // ── 9. Performance Chart ──────────────────────────────────────────
+  togglePerformanceChart() {
+    const container = document.getElementById('chartContainer');
+    if (!container) return;
 
-  initPerformanceChart() {
-    const canvas = document.getElementById('latencyChart');
-    if (!canvas) return;
-    this.performanceChart = {
-      canvas,
-      ctx: canvas.getContext('2d'),
-      width: canvas.width,
-      height: canvas.height,
-    };
+    this.showChart = !this.showChart;
+    container.style.display = this.showChart ? 'block' : 'none';
+
+    if (this.showChart && !this.chartCanvas) {
+      this.chartCanvas = document.getElementById('latencyCanvas');
+      this.chartCtx = this.chartCanvas.getContext('2d');
+    }
+
+    if (this.showChart) this.renderChart();
   }
 
-  updatePerformanceChart() {
-    if (!this.performanceChart) return;
-    const { ctx, width, height } = this.performanceChart;
+  renderChart() {
+    if (!this.chartCtx || !this.chartCanvas) return;
+    const ctx = this.chartCtx;
+    const w = this.chartCanvas.width;
+    const h = this.chartCanvas.height;
 
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, w, h);
 
-    // Grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    // Background Grid
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
     ctx.lineWidth = 1;
-    for (let i = 0; i <= 5; i++) {
-      const y = (height * i) / 5;
+    for (let i = 1; i < 4; i++) {
+      const y = (h * i) / 4;
       ctx.beginPath();
       ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
+      ctx.lineTo(w, y);
       ctx.stroke();
     }
 
-    // Latency line
+    // Latency Plot (Red)
     if (this.latencyHistory.length > 1) {
-      const max = Math.max(...this.latencyHistory, 200);
+      const maxLat = Math.max(100, ...this.latencyHistory);
       ctx.strokeStyle = '#ff6b6b';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      this.latencyHistory.forEach((v, i) => {
-        const x = (width * i) / (this.maxHistoryLength - 1);
-        const y = height - (height * v) / max;
+      this.latencyHistory.forEach((val, i) => {
+        const x = (w * i) / (this.maxHistory - 1);
+        const y = h - (val / maxLat) * (h - 10) - 5;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       });
       ctx.stroke();
     }
 
-    // FPS line
+    // FPS Plot (Green)
     if (this.fpsHistory.length > 1) {
-      const max = Math.max(...this.fpsHistory, 30);
+      const maxFps = Math.max(30, ...this.fpsHistory);
       ctx.strokeStyle = '#51cf66';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      this.fpsHistory.forEach((v, i) => {
-        const x = (width * i) / (this.maxHistoryLength - 1);
-        const y = height - (height * v) / max;
+      this.fpsHistory.forEach((val, i) => {
+        const x = (w * i) / (this.maxHistory - 1);
+        const y = h - (val / maxFps) * (h - 10) - 5;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       });
       ctx.stroke();
     }
 
-    // Labels
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '10px Inter, Arial, sans-serif';
-    ctx.fillText('Latency (red)', 5, 14);
-    ctx.fillText('FPS (green)', 5, 28);
+    // Legend
+    ctx.font = '10px Inter, sans-serif';
+    ctx.fillStyle = '#ff6b6b';
+    ctx.fillText('Latency (ms)', 8, 14);
+    ctx.fillStyle = '#51cf66';
+    ctx.fillText('FPS', 90, 14);
   }
 
-  startMetricsUpdate() {
-    // Lightweight periodic server metrics fetch
-    setInterval(async () => {
-      try {
-        await fetch('/api/metrics');
-      } catch {
-        // Ignore fetch errors silently
+  // ── 10. Benchmark & Metrics Actions ───────────────────────────────
+  async runBenchmark() {
+    const btn = document.getElementById('benchmarkBtn');
+    if (!btn) return;
+
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '⏱️ Running (30s)...';
+
+    try {
+      await this.resetMetrics();
+      window.WebRTCUtils.showToast('Benchmark started for 30 seconds...', 'info');
+
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+
+      const res = await fetch('/api/metrics');
+      const data = await res.json();
+
+      this.saveJsonFile(data, `benchmark-${Date.now()}.json`);
+      window.WebRTCUtils.showToast(
+        `Benchmark Complete! Median: ${data.median_latency_ms}ms, P95: ${data.p95_latency_ms}ms, FPS: ${data.processed_fps}`,
+        'success',
+        6000
+      );
+    } catch (err) {
+      console.error('Benchmark failed:', err);
+      window.WebRTCUtils.showToast('Benchmark failed to complete.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  }
+
+  async resetMetrics() {
+    try {
+      const res = await fetch('/api/reset-metrics', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': this.csrfToken || ''
+        }
+      });
+      if (res.ok) {
+        this.processedFrames = 0;
+        this.fpsCounter = 0;
+        this.latencyHistory = [];
+        this.fpsHistory = [];
+        this.updateMetricsUI(0, 0);
+        window.WebRTCUtils.showToast('Metrics reset successfully.', 'info');
       }
-    }, 10_000);
+    } catch (err) {
+      console.error('Failed to reset metrics:', err);
+    }
   }
-}
 
-// ── Global Button Handlers ──
+  async downloadMetrics() {
+    try {
+      const res = await fetch('/api/metrics');
+      const data = await res.json();
+      this.saveJsonFile(data, `metrics-${Date.now()}.json`);
+    } catch (err) {
+      console.error('Failed to export metrics:', err);
+    }
+  }
 
-async function runBenchmark() {
-  const btn = document.getElementById('benchmarkBtn');
-  if (!btn) return;
-  const original = btn.textContent;
-  btn.textContent = '⏱️ Running (30s)...';
-  btn.disabled = true;
-
-  try {
-    await fetch('/api/reset-metrics', { method: 'POST' });
-    await new Promise((r) => setTimeout(r, 30_000));
-
-    const res = await fetch('/api/metrics');
-    const data = await res.json();
-
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: 'application/json',
-    });
+  saveJsonFile(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'metrics.json';
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  }
 
-    alert(
-      `Benchmark complete!\n` +
-      `Median latency: ${data.median_latency_ms}ms\n` +
-      `P95 latency: ${data.p95_latency_ms}ms\n` +
-      `FPS: ${data.processed_fps}`
-    );
-  } catch (error) {
-    console.error('Benchmark failed:', error);
-    alert('Benchmark failed. Is the server running?');
-  } finally {
-    btn.textContent = original;
-    btn.disabled = false;
+  // ── 11. Cleanup Lifecycle ─────────────────────────────────────────
+  dispose() {
+    if (this.rAfHandle) cancelAnimationFrame(this.rAfHandle);
+    if (this.desktopDetectionLoop) clearInterval(this.desktopDetectionLoop);
+    if (this.resizeObserver) this.resizeObserver.disconnect();
+    if (this.negotiator) this.negotiator.dispose();
+    if (this.peerConnection) this.peerConnection.close();
+    if (this.socket) this.socket.disconnect();
   }
 }
 
-async function resetMetrics() {
-  try {
-    await fetch('/api/reset-metrics', { method: 'POST' });
-  } catch (error) {
-    console.error('Failed to reset metrics:', error);
-  }
-}
-
-async function downloadMetrics() {
-  try {
-    const res = await fetch('/api/metrics');
-    const data = await res.json();
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'metrics.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch (error) {
-    console.error('Failed to download metrics:', error);
-  }
-}
-
-function togglePerformanceChart() {
-  const chart = document.getElementById('performanceChart');
-  const btn = document.getElementById('performanceBtn');
-  if (!chart || !btn) return;
-  const visible = chart.style.display !== 'none';
-  chart.style.display = visible ? 'none' : 'block';
-  btn.textContent = visible ? '📈 Performance Chart' : '📈 Hide Chart';
-}
-
-// ── Initialize ──
 document.addEventListener('DOMContentLoaded', () => {
-  new WebRTCObjectDetection();
+  window.desktopApp = new DesktopApp();
 });

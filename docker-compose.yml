@@ -1,19 +1,41 @@
-version: '3.8'
-
 services:
   webrtc-detection:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: webrtc-object-detection:latest
+    container_name: webrtc-detection
     ports:
       - "3443:3443"
       - "3000:3000"
     environment:
+      - NODE_ENV=production
       - PORT=3443
       - HTTP_PORT=3000
-      - NODE_ENV=production
+      - MAX_ROOMS=100
+      - LOG_LEVEL=info
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    pids_limit: 100
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     networks:
-      - webrtc-network
+      - webrtc-net
 
 networks:
-  webrtc-network:
+  webrtc-net:
     driver: bridge

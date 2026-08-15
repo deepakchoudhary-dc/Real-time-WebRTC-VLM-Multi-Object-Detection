@@ -1,375 +1,441 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Real-time WebRTC object detection using TensorFlow.js COCO-SSD. Stream from phone, detect in browser.">
-    <title>WebRTC Object Detection — Desktop</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Real-time WebRTC object detection using TensorFlow.js COCO-SSD. Stream from phone, detect in browser.">
+  <title>WebRTC Object Detection — Desktop Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0b0d17;
+      --bg-surface: #141726;
+      --bg-card: rgba(255, 255, 255, 0.04);
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --accent-purple: #7c5cfc;
+      --accent-blue: #339af0;
+      --accent-green: #51cf66;
+      --accent-red: #ff6b6b;
+      --accent-amber: #fcc419;
+      --text-main: #f1f3f9;
+      --text-muted: #8b92a5;
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+    }
 
-        body {
-            font-family: 'Inter', system-ui, sans-serif;
-            background: #0f0f1a;
-            color: #e4e4ef;
-            min-height: 100vh;
-        }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        .container {
-            max-width: 1280px;
-            margin: 0 auto;
-            padding: 24px;
-        }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
 
-        /* ── Header ── */
-        .header {
-            text-align: center;
-            margin-bottom: 28px;
-        }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+      width: 100%;
+      flex: 1;
+    }
 
-        .header h1 {
-            font-size: 1.8rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #7c5cfc, #339af0, #51cf66);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
+    /* ── Header ── */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
 
-        .header-sub {
-            margin-top: 8px;
-            display: flex;
-            justify-content: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
+    .brand-title {
+      font-size: 1.6rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue), var(--accent-green));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 5px 14px;
-            border-radius: 20px;
-            font-size: 0.78rem;
-            font-weight: 500;
-            background: rgba(124,92,252,0.15);
-            border: 1px solid rgba(124,92,252,0.25);
-        }
+    .badge-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
 
-        #modelStatus {
-            padding: 8px 18px;
-            border-radius: 8px;
-            font-size: 0.82rem;
-            font-weight: 500;
-            background: rgba(51,154,240,0.2);
-            border: 1px solid rgba(51,154,240,0.3);
-            text-align: center;
-            margin-bottom: 16px;
-            transition: all 0.3s ease;
-        }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      background: rgba(124, 92, 252, 0.12);
+      border: 1px solid rgba(124, 92, 252, 0.25);
+      color: #d1c4e9;
+    }
 
-        /* ── Layout ── */
-        .main-content {
-            display: grid;
-            grid-template-columns: 1fr 320px;
-            gap: 20px;
-        }
+    /* ── Model Banner ── */
+    #modelStatus {
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      font-size: 0.85rem;
+      font-weight: 500;
+      background: rgba(51, 154, 240, 0.15);
+      border: 1px solid rgba(51, 154, 240, 0.3);
+      color: #90caf9;
+      text-align: center;
+      margin-bottom: 20px;
+      transition: all 0.3s ease;
+      display: none;
+    }
 
-        /* ── Video ── */
-        .video-section {
-            background: rgba(255,255,255,0.03);
-            border-radius: 16px;
-            padding: 16px;
-            border: 1px solid rgba(255,255,255,0.06);
-        }
+    /* ── Main Layout ── */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 24px;
+    }
 
-        .video-container {
-            position: relative;
-            width: 100%;
-            background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            aspect-ratio: 16/9;
-        }
+    /* ── Video Viewport ── */
+    .viewport-card {
+      background: var(--bg-surface);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+    }
 
-        #remoteVideo {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            display: block;
-        }
+    .video-wrapper {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      aspect-ratio: 16/9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
 
-        .overlay-canvas {
-            position: absolute;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            pointer-events: none;
-        }
+    #remoteVideo {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
 
-        .loading {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            gap: 14px;
-            color: #888;
-            font-size: 0.9rem;
-        }
+    .overlay-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
 
-        .spinner {
-            width: 32px; height: 32px;
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top: 3px solid #7c5cfc;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
+    .waiting-indicator {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
 
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+    .spinner {
+      width: 38px;
+      height: 38px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top: 3px solid var(--accent-purple);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
 
-        /* ── Sidebar ── */
-        .sidebar {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
 
-        .card {
-            background: rgba(255,255,255,0.03);
-            border-radius: 14px;
-            padding: 18px;
-            border: 1px solid rgba(255,255,255,0.06);
-        }
+    /* ── Sidebar ── */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
 
-        .card h3, .card h4 {
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: #aaa;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+    .card {
+      background: var(--bg-surface);
+      border-radius: var(--radius-md);
+      padding: 18px;
+      border: 1px solid var(--border-subtle);
+    }
 
-        /* ── QR ── */
-        .qr-section { text-align: center; }
+    .card-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
 
-        .qr-code {
-            width: 180px; height: 180px;
-            margin: 8px auto;
-            background: #fff;
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
+    /* ── QR Section ── */
+    .qr-card { text-align: center; }
 
-        .qr-code img { max-width: 170px; max-height: 170px; }
+    .qr-container {
+      width: 190px;
+      height: 190px;
+      margin: 10px auto;
+      background: #fff;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
 
-        #connectionUrl {
-            font-size: 0.72rem;
-            color: #888;
-            word-break: break-all;
-            margin-top: 8px;
-        }
+    .qr-container img {
+      max-width: 176px;
+      max-height: 176px;
+    }
 
-        #roomCode {
-            display: inline-block;
-            padding: 4px 12px;
-            margin-top: 6px;
-            background: rgba(124,92,252,0.2);
-            border-radius: 6px;
-            font-weight: 700;
-            font-size: 1.1rem;
-            letter-spacing: 2px;
-            color: #b197fc;
-        }
+    .room-code-tag {
+      display: inline-block;
+      padding: 4px 14px;
+      margin-top: 8px;
+      background: rgba(124, 92, 252, 0.2);
+      border: 1px solid rgba(124, 92, 252, 0.4);
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: 2px;
+      color: #b197fc;
+    }
 
-        /* ── Connection Status ── */
-        .connection-status {
-            padding: 10px;
-            border-radius: 10px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 0.85rem;
-            transition: all 0.3s ease;
-        }
+    #connectionUrl {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      word-break: break-all;
+      margin-top: 8px;
+      font-family: monospace;
+    }
 
-        .status-disconnected { background: rgba(255,71,87,0.2); color: #ff6b6b; border: 1px solid rgba(255,71,87,0.3); }
-        .status-connecting { background: rgba(255,165,2,0.15); color: #ffa502; border: 1px solid rgba(255,165,2,0.3); }
-        .status-connected { background: rgba(81,207,102,0.15); color: #51cf66; border: 1px solid rgba(81,207,102,0.3); }
+    /* ── Status Pill ── */
+    .status-pill {
+      padding: 10px;
+      border-radius: 10px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 0.85rem;
+      transition: all 0.3s ease;
+    }
 
-        /* ── Metrics ── */
-        .metric-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 6px 0;
-        }
+    .status-disconnected { background: rgba(255, 107, 107, 0.15); color: var(--accent-red); border: 1px solid rgba(255, 107, 107, 0.3); }
+    .status-connecting { background: rgba(252, 196, 25, 0.15); color: var(--accent-amber); border: 1px solid rgba(252, 196, 25, 0.3); }
+    .status-connected { background: rgba(81, 207, 102, 0.15); color: var(--accent-green); border: 1px solid rgba(81, 207, 102, 0.3); }
 
-        .metric-row + .metric-row { border-top: 1px solid rgba(255,255,255,0.04); }
+    /* ── Metric Rows ── */
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+    }
 
-        .metric-label { color: #777; font-size: 0.82rem; }
-        .metric-value { font-weight: 600; font-size: 0.9rem; color: #51cf66; }
+    .metric-row + .metric-row {
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+    }
 
-        /* ── Buttons ── */
-        .controls { display: flex; flex-direction: column; gap: 8px; }
+    .metric-label { color: var(--text-muted); font-size: 0.82rem; }
+    .metric-val { font-weight: 600; font-size: 0.95rem; color: var(--accent-green); font-family: monospace; }
 
-        .btn {
-            padding: 10px 16px;
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            font-family: 'Inter', sans-serif;
-            font-weight: 600;
-            font-size: 0.82rem;
-            transition: all 0.2s ease;
-        }
+    /* ── Buttons & Controls ── */
+    .action-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
 
-        .btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
-        .btn:active { transform: translateY(0); }
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 0.82rem;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
 
-        .btn-primary { background: linear-gradient(135deg, #7c5cfc, #5c3fd1); color: #fff; }
-        .btn-secondary { background: rgba(255,255,255,0.06); color: #ccc; border: 1px solid rgba(255,255,255,0.08); }
-        .btn-danger { background: rgba(255,71,87,0.15); color: #ff6b6b; border: 1px solid rgba(255,71,87,0.2); }
+    .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn:focus-visible { outline: 2px solid var(--accent-purple); outline-offset: 2px; }
 
-        /* ── Detection List ── */
-        .detection-list {
-            max-height: 180px;
-            overflow-y: auto;
-        }
+    .btn-primary { background: linear-gradient(135deg, var(--accent-purple), #5c3fd1); color: #fff; }
+    .btn-secondary { background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border-subtle); }
+    .btn-danger { background: rgba(255, 107, 107, 0.15); color: var(--accent-red); border: 1px solid rgba(255, 107, 107, 0.3); }
 
-        .detection-item {
-            background: rgba(81,207,102,0.08);
-            padding: 8px 12px;
-            margin-bottom: 4px;
-            border-radius: 8px;
-            font-size: 0.82rem;
-            border-left: 3px solid #51cf66;
-        }
+    /* ── Detection Feed ── */
+    .detection-list {
+      max-height: 170px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
-        /* ── Chart ── */
-        #performanceChart {
-            margin-top: 12px;
-            border-radius: 10px;
-            overflow: hidden;
-            background: rgba(0,0,0,0.3);
-        }
+    .detection-chip {
+      background: rgba(81, 207, 102, 0.08);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      border-left: 3px solid var(--accent-green);
+      display: flex;
+      justify-content: space-between;
+    }
 
-        #latencyChart {
-            display: block;
-            width: 100%;
-        }
+    /* ── Chart ── */
+    #chartContainer {
+      border-radius: 10px;
+      overflow: hidden;
+      background: rgba(0, 0, 0, 0.4);
+      padding: 8px;
+      display: none;
+    }
 
-        /* ── Responsive ── */
-        @media (max-width: 860px) {
-            .main-content { grid-template-columns: 1fr; }
-            .header h1 { font-size: 1.4rem; }
-        }
-    </style>
+    #latencyCanvas {
+      display: block;
+      width: 100%;
+      height: 120px;
+    }
+
+    @media (max-width: 900px) {
+      .main-grid { grid-template-columns: 1fr; }
+      header { flex-direction: column; gap: 12px; text-align: center; }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 WebRTC Object Detection</h1>
-            <div class="header-sub">
-                <span class="badge">🧠 TensorFlow.js COCO-SSD</span>
-                <span class="badge">🔒 Local Processing</span>
-            </div>
+  <div class="container">
+    <header>
+      <div class="brand-title">
+        <span>🎯</span> WebRTC Object Detection
+      </div>
+      <div class="badge-group">
+        <span class="badge">🧠 TensorFlow.js COCO-SSD</span>
+        <span class="badge">🔒 Privacy-First P2P</span>
+        <span class="badge">⚡ WebGL GPU</span>
+      </div>
+    </header>
+
+    <div id="modelStatus" role="status" aria-live="polite">🧠 Initializing AI Detector...</div>
+
+    <main class="main-grid">
+      <!-- Video / Detection Viewport -->
+      <section class="viewport-card" aria-label="Video Stream and AI Bounding Boxes">
+        <div class="video-wrapper" id="videoContainer">
+          <div class="waiting-indicator" id="loadingIndicator">
+            <div class="spinner" aria-hidden="true"></div>
+            <span>Waiting for mobile camera stream...</span>
+          </div>
+          <video id="remoteVideo" autoplay playsinline muted></video>
+          <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
+        </div>
+      </section>
+
+      <!-- Sidebar Controls & Metrics -->
+      <aside class="sidebar" aria-label="Session Controls and Metrics">
+        <!-- QR Code Pairing -->
+        <div class="card qr-card">
+          <div class="card-title">📱 Connect Phone</div>
+          <p style="font-size: 0.78rem; color: var(--text-muted);">Scan with your mobile camera</p>
+          <div class="qr-container" id="qrCodeContainer">
+            <div class="spinner" aria-hidden="true"></div>
+          </div>
+          <div class="room-code-tag" id="roomCodeDisplay">------</div>
+          <div id="connectionUrl"></div>
         </div>
 
-        <div id="modelStatus" style="display: none;">🧠 Loading AI model...</div>
-
-        <div class="main-content">
-            <div class="video-section">
-                <div class="video-container" id="videoContainer">
-                    <div class="loading" id="loadingIndicator">
-                        <div class="spinner"></div>
-                        Waiting for phone connection...
-                    </div>
-                    <video id="remoteVideo" autoplay playsinline muted style="display: none;"></video>
-                    <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
-                </div>
-            </div>
-
-            <div class="sidebar">
-                <!-- QR Code -->
-                <div class="card qr-section">
-                    <h3>📱 Connect Phone</h3>
-                    <p style="font-size: 0.78rem; color: #888; margin-bottom: 8px;">Scan with your phone's camera</p>
-                    <div class="qr-code" id="qrCode">
-                        <div class="spinner"></div>
-                    </div>
-                    <div id="roomCode"></div>
-                    <div id="connectionUrl"></div>
-                </div>
-
-                <!-- Connection Status -->
-                <div class="connection-status status-disconnected" id="connectionStatus">
-                    📱 Disconnected
-                </div>
-
-                <!-- Metrics -->
-                <div class="card">
-                    <h4>📊 Live Metrics</h4>
-                    <div class="metric-row">
-                        <span class="metric-label">Latency</span>
-                        <span class="metric-value" id="latencyMetric">—</span>
-                    </div>
-                    <div class="metric-row">
-                        <span class="metric-label">FPS</span>
-                        <span class="metric-value" id="fpsMetric">—</span>
-                    </div>
-                    <div class="metric-row">
-                        <span class="metric-label">Processed</span>
-                        <span class="metric-value" id="processedMetric">—</span>
-                    </div>
-                    <div class="metric-row">
-                        <span class="metric-label">Objects</span>
-                        <span class="metric-value" id="objectsMetric">—</span>
-                    </div>
-                </div>
-
-                <!-- Controls -->
-                <div class="controls">
-                    <button class="btn btn-primary" id="benchmarkBtn" onclick="runBenchmark()">🚀 Run Benchmark</button>
-                    <button class="btn btn-secondary" id="resetBtn" onclick="resetMetrics()">🔄 Reset Metrics</button>
-                    <button class="btn btn-danger" id="downloadBtn" onclick="downloadMetrics()">📊 Download Results</button>
-                    <button class="btn btn-secondary" id="performanceBtn" onclick="togglePerformanceChart()">📈 Performance Chart</button>
-                </div>
-
-                <!-- Chart -->
-                <div id="performanceChart" style="display: none;">
-                    <canvas id="latencyChart" width="280" height="140"></canvas>
-                </div>
-
-                <!-- Detections -->
-                <div class="card">
-                    <h4>🎯 Recent Detections</h4>
-                    <div class="detection-list" id="detectionList">
-                        <div style="color: #666; text-align: center; padding: 16px; font-size: 0.82rem;">
-                            No detections yet
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <!-- Connection Status -->
+        <div class="status-pill status-disconnected" id="connectionStatus" role="status">
+          📱 Disconnected
         </div>
-    </div>
 
-    <!-- TensorFlow.js + COCO-SSD from CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+        <!-- Live Metrics -->
+        <div class="card" aria-label="Live Metrics">
+          <div class="card-title">📊 Real-Time Metrics</div>
+          <div class="metric-row">
+            <span class="metric-label">Latency (E2E)</span>
+            <span class="metric-val" id="latencyMetric">—</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Processing FPS</span>
+            <span class="metric-val" id="fpsMetric">—</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Frames Processed</span>
+            <span class="metric-val" id="processedMetric">0</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Active Objects</span>
+            <span class="metric-val" id="objectsMetric">0</span>
+          </div>
+        </div>
 
-    <!-- Socket.IO (served by server) -->
-    <script src="/socket.io/socket.io.js"></script>
+        <!-- Actions -->
+        <div class="action-stack">
+          <button class="btn btn-primary" id="benchmarkBtn">⏱️ Run 30s Benchmark</button>
+          <button class="btn btn-secondary" id="performanceBtn">📈 Performance Chart</button>
+          <button class="btn btn-secondary" id="downloadBtn">📥 Export Metrics JSON</button>
+          <button class="btn btn-danger" id="resetBtn">🔄 Reset Metrics</button>
+        </div>
 
-    <!-- App -->
-    <script src="js/yolo-detector.js"></script>
-    <script src="js/app.js"></script>
+        <!-- Performance Chart -->
+        <div class="card" id="chartContainer">
+          <canvas id="latencyCanvas" width="300" height="120"></canvas>
+        </div>
+
+        <!-- Detections Feed -->
+        <div class="card">
+          <div class="card-title">🎯 Detected Objects</div>
+          <div class="detection-list" id="detectionList" aria-live="polite">
+            <div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 12px;">
+              No detections yet
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script src="js/core/common.js"></script>
+  <script src="js/detector.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

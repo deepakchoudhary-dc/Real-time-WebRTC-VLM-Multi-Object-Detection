@@ -1,25 +1,25 @@
 {
   "name": "webrtc-object-detection",
-  "version": "2.0.0",
-  "description": "Real-time WebRTC Multi-Object Detection with TensorFlow.js COCO-SSD",
-  "main": "server/https_server.js",
+  "version": "2.1.0",
+  "description": "Production-Grade Privacy-First WebRTC Real-Time Multi-Object Detection with TensorFlow.js COCO-SSD",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node server/https_server.js",
-    "dev": "nodemon server/https_server.js"
+    "start": "node server/index.js",
+    "dev": "nodemon server/index.js",
+    "test": "node test/run-all.js",
+    "check": "npm run test"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "qrcode": "^1.5.3",
-    "selfsigned": "^3.0.1",
-    "socket.io": "^4.7.2"
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^3.0.3",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "cross-env": "^7.0.3",
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.1.9"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=20.0.0"
   },
   "keywords": [
     "webrtc",
@@ -27,7 +27,8 @@
     "computer-vision",
     "real-time",
     "tensorflow-js",
-    "coco-ssd"
+    "coco-ssd",
+    "privacy-first"
   ],
   "author": "",
   "license": "MIT"

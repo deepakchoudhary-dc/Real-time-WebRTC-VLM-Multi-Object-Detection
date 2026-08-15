@@ -1,90 +1,103 @@
-# 📱🎯 Real-Time WebRTC Multi-Object Detection
+# 📱🎯 Real-Time WebRTC Multi-Object Detection v2.1
 
-A privacy-first, real-time computer vision system that streams a mobile camera feed to a desktop browser over **WebRTC** and performs **genuine multi-object detection** using **TensorFlow.js & COCO-SSD** with WebGL GPU acceleration.
+A production-grade, privacy-first computer vision system that turns any mobile phone into a wireless real-time AI camera stream over **P2P WebRTC** with **TensorFlow.js COCO-SSD** running client-side GPU-accelerated multi-object detection.
 
 ---
 
-## ✨ Features
+## ✨ Features & Architecture
 
-- 📱 **Wireless Mobile Camera Stream:** Transform any phone into a high-frame-rate wireless camera stream via P2P WebRTC.
-- 🧠 **Real On-Device AI Detection:** Powered by TensorFlow.js COCO-SSD (detects 80 real COCO classes: person, car, phone, bottle, laptop, chair, etc.).
-- 🔒 **Privacy-First & Secure:**
-  - Dynamic in-memory self-signed TLS certificates (no hardcoded secrets).
-  - Secure room-based signaling isolation (devices pair securely via 4-character Room codes).
-  - WebRTC video is processed locally in the client browser with GPU acceleration.
-- ⚡ **Zero Local Heavy Downloads:** TensorFlow.js and COCO-SSD load directly via CDN into browser WebGL cache.
-- 📊 **Real-time Performance Metrics:** Live measurement of latency, processing FPS, object counts, and interactive latency charts.
-- 🐳 **Container Ready:** Clean Docker and Docker Compose configuration.
+```
+[ Mobile Phone (Camera Node) ] 
+       │  ▲
+WebRTC │  │  Socket.IO Thin Signaling Relay
+Video  │  │  (Token-authenticated, role-isolated, offer-buffered)
+Media  │  │
+       ▼  │
+[ Desktop Hub / Browser Client ] ◄── [ Express HTTPS Server ]
+       │                               (Dynamic SAN TLS, CSP)
+   WebGL GPU / TF.js COCO-SSD
+  (Real-Time Inference Overlay)
+```
+
+- 📱 **Wireless Mobile Camera Stream:** Streams low-latency camera video from phone to desktop over direct P2P WebRTC.
+- 🧠 **Genuine Client-Side AI Detection:** Powered by TensorFlow.js COCO-SSD detecting 80 COCO object classes (`person`, `car`, `phone`, `bottle`, `laptop`, etc.) using WebGL GPU hardware acceleration.
+- 🔒 **Zero-Trust Security & Privacy:**
+  - **Room Token Authentication:** Cryptographically generated room codes (`crypto.randomInt`) and secret room tokens (`crypto.randomBytes`) preventing eavesdropping and stream hijacking (fixes F-01, F-02).
+  - **Point-to-Peer Routing:** Signaling messages (SDP offers/answers, ICE candidates) are routed strictly to designated peer socket IDs, never broadcast to rooms (fixes F-04).
+  - **Dynamic In-Memory SAN Certificates:** Generated on boot with Subject Alternative Names (SANs) for all local LAN IPs, eliminating browser warnings on mobile and iOS Safari (fixes F-15).
+  - **Strict CSP & Security Headers:** Hardened Content Security Policy, HSTS, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
+- ⚡ **MDN Perfect Negotiation & Offer Buffering:**
+  - Seamless connection flow regardless of whether Desktop or Phone joins first.
+  - Automatic glare recovery, ICE candidate queueing, and connection recovery.
+- 📊 **Canonical Live Metrics & Benchmark Suite:**
+  - Single-source frame counting (eliminating double-counting bugs).
+  - True End-to-End latency measurement (`Date.now() - capture_ts`), live FPS calculations, and a built-in 30-second automated benchmark tool with JSON export.
+- 🐳 **Hardened Container Deployment:** Multi-stage `node:22-alpine` image with non-root execution (`USER node`), dumb-init signal handling, resource limits, and health checks.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Prerequisites
-- **Node.js** 16+ ([Download](https://nodejs.org/))
-- **Modern Web Browser** (Chrome, Edge, Safari, Firefox) with WebGL enabled
-- **Mobile Device** with a camera on the same Wi-Fi / Local Network
+### Prerequisites
+- **Node.js** 20+ ([Download](https://nodejs.org/))
+- **Modern Web Browser** (Chrome, Firefox, Safari, Edge) with WebGL enabled
+- **Mobile Phone** connected to the same Wi-Fi / LAN
 
-### 2. Installation
+### 1. Installation
 ```bash
 # Clone the repository
 git clone https://github.com/deepakchoudhary-dc/Real-time-WebRTC-VLM-Multi-Object-Detection.git
 cd Real-time-WebRTC-VLM-Multi-Object-Detection
 
-# Install lightweight dependencies
-npm install
-
 # Start the secure HTTPS server
 npm start
 ```
 
-### 3. Connect & Detect
-1. **Desktop:** Open `https://localhost:3443` in your browser.
-   - *Note:* Accept the self-signed certificate warning (standard for local HTTPS).
-2. **Mobile:** Scan the generated QR code or open `https://<YOUR-LOCAL-IP>:3443/phone?room=<ROOM_CODE>`.
-3. **Detection:** Tap **"Start Camera"** on your phone. Real-time bounding boxes and labels will track objects on both mobile and desktop screens!
+### 2. Connect & Detect
+1. **Desktop:** Open `https://localhost:3443` in your desktop browser.
+   - *Note:* Accept the self-signed certificate warning once (standard for local development HTTPS).
+2. **Mobile:** Scan the QR code displayed on the desktop screen or open the provided link `https://<YOUR-LAN-IP>:3443/phone?room=<CODE>&token=<TOKEN>`.
+3. **Detection:** Tap **"Start Camera"** on your phone. Real-time AI bounding boxes will track objects with live latency and FPS metrics.
 
 ---
 
-## 🛠️ Architecture & Technology Stack
+## 🧪 Testing & Verification
 
-```
-[ Mobile Browser (Phone) ]
-       │  ▲
-WebRTC │  │ Socket.IO Signaling (Room-Isolated)
-Video  │  │ & Detection Relay
-       ▼  │
-[ Desktop Browser / Client ]  ◄── [ HTTPS / Express Backend ]
-       │
-   WebGL / TF.js COCO-SSD
-  (Real-Time Inference Overlay)
+Run the automated test suite covering unit tests and integration tests:
+
+```bash
+npm test
 ```
 
-- **Frontend:** Modern Vanilla JavaScript (ES6+), HTML5 Canvas API, WebGL.
-- **Computer Vision:** TensorFlow.js (`@tensorflow/tfjs`) + COCO-SSD (`@tensorflow-models/coco-ssd`).
-- **Backend & Signaling:** Node.js, Express, Socket.IO, `selfsigned`.
-- **Security:** Room-scoped WebRTC signaling, in-memory dynamic TLS, Content Security Policy, rate limiting, payload validation.
-
----
-
-## 🔒 Cybersecurity & Hardening
-
-- **Dynamic Ephemeral Certificates:** Generated at boot time using `selfsigned`; zero private keys stored in the git repository.
-- **Room-Isolated Signaling:** Prevents cross-session eavesdropping and signaling collision by strictly scoping SDP offers/answers to unique room IDs.
-- **Socket.IO Hardening:** Message size limits (1MB cap) and payload schema validation on all incoming socket events.
-- **XSS Prevention:** Safe DOM manipulation with no raw HTML injection.
-- **Memory Safety:** Metrics ring buffer (capped at 1,000 entries) preventing server memory leaks.
+Test suites include:
+- `test/unit/room-store.test.js`: Token validation, slot assignment, 3rd peer rejection, TTL sweep.
+- `test/unit/metrics.test.js`: Bounded ring buffer, `NaN`/infinite number rejection, percentile math.
+- `test/unit/rate-limiter.test.js`: Socket event token bucket rate limiting.
+- `test/unit/security.test.js`: Origin checks, host header sanitization, CSRF tokens.
+- `test/integration/routes.test.js`: Health checks, QR generation, ICE configuration, CSRF reset.
+- `test/integration/signaling.test.js`: Socket.IO WebRTC pairing, offer buffering, role security.
 
 ---
 
 ## 🐳 Docker Deployment
 
-Run with Docker Compose in one command:
+Run with Docker Compose in a single command:
 
 ```bash
 docker-compose up --build
 ```
-Access at `https://localhost:3443` (HTTP redirects automatically from `http://localhost:3000`).
+
+Access at `https://localhost:3443` (HTTP on port `3000` automatically redirects to HTTPS `3443`).
+
+---
+
+## 📄 Documentation Links
+
+- 📖 [DEVELOPMENT.md](DEVELOPMENT.md) — Developer setup, module split, and local testing.
+- 🔒 [SECURITY.md](SECURITY.md) — Threat model, security audit findings, and hardening details.
+- 🏗️ [ARCHITECTURE.md](ARCHITECTURE.md) — WebRTC signaling state machine and data flow.
+- 📡 [API.md](API.md) — REST endpoints and Socket.IO protocol specification.
+- 📜 [CHANGELOG.md](CHANGELOG.md) — Release notes and audit remediations.
 
 ---
 

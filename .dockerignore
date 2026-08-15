@@ -3,11 +3,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .git
+.github
 .gitignore
-README.md
-DESIGN_REPORT.md
 .dockerignore
+.env
+.env.*
 *.md
+!README.md
 coverage
 .nyc_output
 logs
@@ -20,4 +22,4 @@ logs
 Thumbs.db
 *.tmp
 *.temp
-ngrok.log
+test
