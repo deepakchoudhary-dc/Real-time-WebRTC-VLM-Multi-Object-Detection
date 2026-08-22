@@ -138,6 +138,14 @@ function securityHeaders(req, res, next) {
   }
 
   // Content Security Policy
+  // NOTE (plan.md Phase 1 review): 'unsafe-eval' CANNOT currently be removed.
+  // tf.min.js@4.10.0 runs under a bundle-wide "use strict" directive, so its
+  // internal regenerator-runtime fallback `Function("r","regeneratorRuntime=r")`
+  // executes at load time in every browser; under a CSP without 'unsafe-eval'
+  // that throws EvalError and the entire model fails to load. This was proven
+  // empirically with test/csp-simulation.js (poisons eval/new Function, loads
+  // the real production bundles). Re-visit after migrating off TF.js
+  // (e.g. YOLOv10-N via ONNX Runtime Web) per the plan's stack recommendations.
   res.setHeader(
     'Content-Security-Policy',
     [

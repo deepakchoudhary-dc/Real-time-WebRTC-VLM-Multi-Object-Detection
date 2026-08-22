@@ -64,3 +64,34 @@ test('MetricsStore - Reset capability', () => {
   assert.equal(snapshot.processed_frames, 0);
   assert.equal(snapshot.median_latency_ms, 0);
 });
+
+test('MetricsStore - Prometheus exposition format (zero-dependency export)', () => {
+  const store = new MetricsStore(100);
+  for (let i = 1; i <= 10; i++) {
+    store.recordLatency(i * 10);
+  }
+  store.incrementProcessedFrames();
+
+  const output = store.getPrometheusFormat();
+
+  // Format fundamentals
+  assert.ok(output.endsWith('\n'));
+  const lines = output.trim().split('\n');
+  assert.ok(lines.every((l) => l.length > 0));
+
+  // Declared families & sample lines
+  assert.match(output, /^# TYPE webrtc_detection_processed_frames_total counter$/m);
+  assert.match(output, /^webrtc_detection_processed_frames_total 1$/m);
+  assert.match(output, /^webrtc_detection_uptime_seconds \d+$/m);
+  assert.match(output, /^webrtc_detection_latency_ms\{quantile="0.5"\} 60$/m);
+  assert.match(output, /^webrtc_detection_latency_ms\{quantile="0.95"\} 100$/m);
+  assert.match(output, /^webrtc_detection_latency_ms_min 10$/m);
+  assert.match(output, /^webrtc_detection_latency_ms_max 100$/m);
+  assert.match(output, /^webrtc_detection_latency_ms_avg 55$/m);
+  assert.match(output, /^webrtc_detection_latency_samples 10$/m);
+
+  // Empty store must still render valid output
+  const emptyOutput = new MetricsStore().getPrometheusFormat();
+  assert.match(emptyOutput, /^webrtc_detection_processed_frames_total 0$/m);
+  assert.match(emptyOutput, /^webrtc_detection_latency_ms\{quantile="0.5"\} 0$/m);
+});

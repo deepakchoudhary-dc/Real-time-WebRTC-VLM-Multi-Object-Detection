@@ -33,10 +33,17 @@ class PhoneCameraApp {
 
     // AI Detector
     this.detector = new window.ObjectDetector();
-    this.detectionInterval = 180; // ms (~5.5 FPS mobile inference)
-    this.detectionTimer = null;
+    this.detectionInterval = 180; // ms base target (~5.5 FPS mobile inference)
+
+    // Adaptive inference scheduling (plan.md Phase 1 — replaces fixed setInterval)
+    this.detectionScheduler = new window.WebRTCUtils.AdaptiveInferenceScheduler(
+      () => this.runDetectionFrame(),
+      { targetInterval: this.detectionInterval, maxInterval: 1000 }
+    );
     this.metricsTimer = null;
-    this.isDetecting = false;
+
+    // WebRTC stats collection & adaptive bitrate (plan.md Phase 1)
+    this.bitrateController = null;
 
     // Metrics
     this.frameCount = 0;
@@ -183,6 +190,36 @@ class PhoneCameraApp {
       this.localStream.getTracks().forEach((track) => {
         this.peerConnection.addTrack(track, this.localStream);
       });
+    }
+
+    // WebRTC stats collection & adaptive bitrate control (plan.md Phase 1)
+    if (this.bitrateController) this.bitrateController.dispose();
+    this.bitrateController = new window.WebRTCUtils.AdaptiveBitrateController(
+      this.peerConnection,
+      {
+        intervalMs: 1000,
+        onStats: (stats) => this.onNetworkStats(stats)
+      }
+    );
+    const videoSender = this.peerConnection
+      .getSenders()
+      .find((s) => s.track && s.track.kind === 'video');
+    if (videoSender) this.bitrateController.attachSender(videoSender);
+    this.bitrateController.startMonitoring();
+  }
+
+  /**
+   * Network quality feedback from getStats polling (plan.md Phase 1).
+   * Sender-side maxBitrate is adapted inside AdaptiveBitrateController;
+   * here we only surface sustained degradation.
+   */
+  onNetworkStats(stats) {
+    if (stats.quality === 'poor' && Date.now() - (this._lastNetWarnTs || 0) > 30_000) {
+      this._lastNetWarnTs = Date.now();
+      console.warn(
+        `[PhoneCameraApp] Poor network: ${Math.round(stats.lossPct)}% loss, ` +
+        `RTT ${stats.rttMs ?? '?'}ms — encoder capped at ${stats.currentMaxBitrateKbps}kbps`
+      );
     }
   }
 
@@ -384,7 +421,7 @@ class PhoneCameraApp {
     this.isHD = !this.isHD;
     const btn = document.getElementById('qualityBtn');
     if (btn) {
-      btn.textContent = this.isHD ? '📺 SD' : '📺 HD';
+      btn.textContent = this.isHD ? 'SD' : 'HD';
       btn.classList.toggle('active', this.isHD);
       btn.setAttribute('aria-pressed', this.isHD ? 'true' : 'false');
     }
@@ -403,54 +440,52 @@ class PhoneCameraApp {
   }
 
   // ── 9. Detection Loop (Single-sided Mobile Inference, N21, H8, N35) ──
+  // Uses AdaptiveInferenceScheduler (plan.md Phase 1) instead of a fixed
+  // setInterval: slow devices back off automatically, fast devices never queue
+  // overlapping inference frames.
   startDetectionLoop() {
-    if (this.detectionTimer || this.disablePhoneInference) return;
-
-    this.detectionTimer = setInterval(async () => {
-      if (this.isDetecting) return;
-      this.isDetecting = true;
-
-      try {
-        const video = document.getElementById('localVideo');
-        if (video && video.readyState >= 2 && this.detector.modelLoaded) {
-          const captureTs = Date.now();
-          const detections = await this.detector.detect(video);
-          const inferenceDuration = Date.now() - captureTs;
-
-          this.lastLatency = inferenceDuration;
-          this.activeObjects = detections.length;
-          this.frameCount++;
-
-          // Draw on phone canvas using shared renderer (H8)
-          window.WebRTCUtils.drawBoundingBoxes(
-            this.overlayCtx,
-            this.overlayCanvas,
-            video,
-            detections,
-            {
-              fitMode: 'cover',
-              isMirrored: this.facingMode === 'user'
-            }
-          );
-
-          // Relay clean payload to desktop (N35)
-          this.socket.emit('detection-result', {
-            capture_ts: captureTs,
-            detections
-          });
-        }
-      } catch {
-        // Frame detection error
-      } finally {
-        this.isDetecting = false;
-      }
-    }, this.detectionInterval);
+    if (this.disablePhoneInference) return;
+    this.detectionScheduler.start();
   }
 
   stopDetectionLoop() {
-    if (this.detectionTimer) {
-      clearInterval(this.detectionTimer);
-      this.detectionTimer = null;
+    this.detectionScheduler.stop();
+  }
+
+  async runDetectionFrame() {
+    const video = document.getElementById('localVideo');
+    if (!video || video.readyState < 2 || !this.detector.modelLoaded) {
+      return;
+    }
+
+    try {
+      const captureTs = Date.now();
+      const detections = await this.detector.detect(video);
+      const inferenceDuration = Date.now() - captureTs;
+
+      this.lastLatency = inferenceDuration;
+      this.activeObjects = detections.length;
+      this.frameCount++;
+
+      // Draw on phone canvas using shared renderer (H8)
+      window.WebRTCUtils.drawBoundingBoxes(
+        this.overlayCtx,
+        this.overlayCanvas,
+        video,
+        detections,
+        {
+          fitMode: 'cover',
+          isMirrored: this.facingMode === 'user'
+        }
+      );
+
+      // Relay clean payload to desktop (N35)
+      this.socket.emit('detection-result', {
+        capture_ts: captureTs,
+        detections
+      });
+    } catch (error) {
+      console.warn('[PhoneCameraApp] Detection frame failed:', error?.message || error);
     }
   }
 
@@ -518,6 +553,7 @@ class PhoneCameraApp {
       this.localStream = null;
     }
     if (this.negotiator) this.negotiator.dispose();
+    if (this.bitrateController) this.bitrateController.dispose();
     if (this.peerConnection) this.peerConnection.close();
     if (this.socket) this.socket.disconnect();
   }

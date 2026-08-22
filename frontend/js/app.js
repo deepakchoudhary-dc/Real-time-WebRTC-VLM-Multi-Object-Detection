@@ -28,9 +28,18 @@ class DesktopApp {
     // AI Detector (optional desktop fallback detection, N21, G03, H3)
     this.detector = new window.ObjectDetector();
     this.detectOnDesktop = sessionStorage.getItem('webrtc_detect_mode') === 'desktop';
-    this.desktopDetectionLoop = null;
-    this.isDetectingDesktop = false; // Re-entrancy guard (R09)
+    this.desktopDetectionInterval = 150; // ms base target (~6.7 FPS desktop inference)
     this.benchmarkAborted = false; // Cancellable benchmark (G16)
+
+    // WebRTC stats collection & adaptive bitrate (plan.md Phase 1)
+    this.bitrateController = null;
+    this._lastNetWarnTs = 0;
+
+    // Adaptive inference scheduling (plan.md Phase 1 — replaces fixed setInterval)
+    this.desktopDetectionScheduler = new window.WebRTCUtils.AdaptiveInferenceScheduler(
+      () => this.runDesktopDetectionFrame(),
+      { targetInterval: this.desktopDetectionInterval, maxInterval: 1000 }
+    );
 
     // Metrics state (Single-source truth)
     this.processedFrames = 0;
@@ -196,6 +205,36 @@ class DesktopApp {
       }
       if (loader) loader.style.display = 'none';
     };
+
+    // WebRTC stats collection & network quality visibility (plan.md Phase 1)
+    if (this.bitrateController) this.bitrateController.dispose();
+    this.bitrateController = new window.WebRTCUtils.AdaptiveBitrateController(
+      this.peerConnection,
+      {
+        intervalMs: 1000,
+        onStats: (stats) => this.onNetworkStats(stats)
+      }
+    );
+    this.bitrateController.startMonitoring();
+  }
+
+  /**
+   * Inbound stream health from getStats polling (plan.md Phase 1).
+   * Surfaces sustained degradation as a throttled toast so users get
+   * visibility into bandwidth/packet-loss problems.
+   */
+  onNetworkStats(stats) {
+    if (
+      (stats.quality === 'poor' || stats.quality === 'degraded') &&
+      Date.now() - this._lastNetWarnTs > 30_000
+    ) {
+      this._lastNetWarnTs = Date.now();
+      window.WebRTCUtils.showToast(
+        `Network degraded — ${Math.round(stats.lossPct)}% packet loss, ` +
+          `${stats.bitrateKbps} kbps, RTT ${stats.rttMs ?? '?'}ms`,
+        'info'
+      );
+    }
   }
 
   // ── 4. Room & QR Code with Session Persistence & Rejoin Backoff (N05, N11, R08, H11) ─
@@ -406,22 +445,24 @@ class DesktopApp {
   }
 
   // ── 7. Desktop Fallback Detection Loop (N21, R09, G15, G17) ─────────
+  // Adaptive inference scheduling (plan.md Phase 1): measures real inference
+  // duration per frame and self-schedules instead of a fixed setInterval.
   async initDesktopDetector() {
     const banner = document.getElementById('modelStatus');
     if (banner) {
       banner.style.display = 'block';
-      banner.textContent = '🧠 Loading desktop AI model...';
+      banner.textContent = 'Loading desktop AI model...';
     }
 
     const ready = await this.detector.loadModel((pct) => {
-      if (banner) banner.textContent = `🧠 Loading AI model... ${pct}%`;
+      if (banner) banner.textContent = `Loading AI model... ${pct}%`;
     });
 
     if (ready && banner) {
-      banner.textContent = '✅ AI model ready (Desktop Mode)';
+      banner.textContent = 'AI model ready (Desktop Mode)';
       setTimeout(() => { banner.style.display = 'none'; }, 2000);
     } else if (banner) {
-      banner.textContent = '❌ Model failed to load.';
+      banner.textContent = 'Model failed to load.';
       const retryBtn = document.createElement('button');
       retryBtn.textContent = 'Retry';
       retryBtn.style.cssText = 'margin-left:8px;padding:2px 8px;cursor:pointer;';
@@ -431,35 +472,28 @@ class DesktopApp {
   }
 
   startDesktopDetection() {
-    if (this.desktopDetectionLoop) return;
-
-    this.desktopDetectionLoop = setInterval(async () => {
-      if (this.isDetectingDesktop) return;
-      this.isDetectingDesktop = true;
-
-      try {
-        const video = document.getElementById('remoteVideo');
-        if (video && video.readyState >= 2 && this.detector.modelLoaded) {
-          const captureTs = Date.now();
-          const detections = await this.detector.detect(video);
-          const frame = {
-            capture_ts: captureTs,
-            detections
-          };
-          this.handleDetectionFrame(frame);
-        }
-      } finally {
-        this.isDetectingDesktop = false;
-      }
-    }, 150);
+    // Safe to start anytime: runDesktopDetectionFrame guards on video readiness
+    // and model state every tick (preserves pre-load start semantics).
+    this.desktopDetectionScheduler.start();
   }
 
   stopDesktopDetection() {
-    if (this.desktopDetectionLoop) {
-      clearInterval(this.desktopDetectionLoop);
-      this.desktopDetectionLoop = null;
+    this.desktopDetectionScheduler.stop();
+  }
+
+  async runDesktopDetectionFrame() {
+    const video = document.getElementById('remoteVideo');
+    if (!video || video.readyState < 2 || !this.detector.modelLoaded) {
+      return;
     }
-    this.isDetectingDesktop = false;
+
+    const captureTs = Date.now();
+    const detections = await this.detector.detect(video);
+    const frame = {
+      capture_ts: captureTs,
+      detections
+    };
+    this.handleDetectionFrame(frame);
   }
 
   // ── 8. UI Updates & Safe Text Content Feed (R01) ───────────────────
@@ -515,7 +549,7 @@ class DesktopApp {
       chip.className = 'detection-chip';
 
       const labelSpan = document.createElement('span');
-      labelSpan.textContent = `🏷️ ${item.label}`;
+      labelSpan.textContent = item.label;
 
       const scoreSpan = document.createElement('span');
       scoreSpan.textContent = `${Math.round(item.score * 100)}%`;
@@ -531,9 +565,9 @@ class DesktopApp {
     if (!el) return;
 
     const map = {
-      connected: ['status-connected', '📱 Phone Connected'],
-      connecting: ['status-connecting', '📱 Connecting...'],
-      disconnected: ['status-disconnected', '📱 Disconnected']
+      connected: ['status-connected', 'Phone Connected'],
+      connecting: ['status-connecting', 'Connecting...'],
+      disconnected: ['status-disconnected', 'Disconnected']
     };
 
     const [cls, text] = map[state] || map.disconnected;
@@ -623,7 +657,7 @@ class DesktopApp {
 
     btn.disabled = true;
     const oldText = btn.textContent;
-    btn.textContent = '⏱️ Running (30s)...';
+    btn.textContent = 'Running (30s)...';
     this.benchmarkAborted = false;
 
     try {
@@ -713,6 +747,7 @@ class DesktopApp {
     this.benchmarkAborted = true;
     if (this.rAfHandle) cancelAnimationFrame(this.rAfHandle);
     this.stopDesktopDetection();
+    if (this.bitrateController) this.bitrateController.dispose();
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.detector) this.detector.dispose();
     if (this.negotiator) this.negotiator.dispose();

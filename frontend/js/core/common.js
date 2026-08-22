@@ -358,8 +358,8 @@ async function fetchIceConfig() {
     if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
       return { iceServers: data.iceServers };
     }
-  } catch {
-    // Default STUN fallback
+  } catch (error) {
+    console.warn('[WebRTCUtils] ICE config fetch failed, using STUN fallback:', error?.message);
   }
 
   return {
@@ -423,6 +423,292 @@ function showToast(message, type = 'info', durationMs = 3500) {
   }, durationMs);
 }
 
+/**
+ * Adaptive Inference Scheduling (plan.md Phase 1 — "Fixed Inference Intervals")
+ *
+ * Replaces fixed setInterval loops: measures real inference duration each frame
+ * and self-schedules the next run so slow devices automatically back off and
+ * fast devices run at the target cadence without queueing overlapping frames.
+ */
+class AdaptiveInferenceScheduler {
+  /**
+   * @param {function} task - async task to execute per tick
+   * @param {object} options
+   * @param {number} options.targetInterval - desired ms between frame STARTS
+   * @param {number} [options.minInterval] - lower bound for adaptive back-off
+   * @param {number} [options.maxInterval] - upper bound for adaptive back-off
+   */
+  constructor(task, options = {}) {
+    if (typeof task !== 'function') {
+      throw new TypeError('AdaptiveInferenceScheduler requires an async task function.');
+    }
+    this.task = task;
+    this.baseTargetInterval = Math.max(10, options.targetInterval || 150);
+    this.targetInterval = this.baseTargetInterval;
+    this.minInterval = Math.max(0, options.minInterval ?? Math.floor(this.baseTargetInterval / 2));
+    this.maxInterval = Math.max(this.targetInterval, options.maxInterval ?? 1000);
+    this.running = false;
+    this.isExecuting = false; // Re-entrancy guard (R09)
+    this.avgDurationMs = 0; // Exponential moving average of inference duration
+    this._timer = null;
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this._schedule(0);
+  }
+
+  stop() {
+    this.running = false;
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+  }
+
+  _schedule(delayMs) {
+    if (!this.running) return;
+    this._timer = setTimeout(() => this._tick(), delayMs);
+  }
+
+  async _tick() {
+    if (!this.running || this.isExecuting) return;
+
+    const start = performance.now();
+    this.isExecuting = true;
+    try {
+      await this.task();
+    } catch (error) {
+      console.warn('[AdaptiveInferenceScheduler] task failed:', error?.message || error);
+    } finally {
+      this.isExecuting = false;
+
+      if (this.running) {
+        const duration = performance.now() - start;
+        this.avgDurationMs =
+          this.avgDurationMs === 0 ? duration : this.avgDurationMs * 0.8 + duration * 0.2;
+
+        // Adaptive back-off: if inference is consistently eating the whole
+        // budget, relax the target so the main thread can breathe.
+        if (this.avgDurationMs > this.targetInterval * 0.9) {
+          this.targetInterval = Math.min(
+            this.maxInterval,
+            Math.ceil(this.targetInterval * 1.25)
+          );
+        } else if (
+          this.avgDurationMs < this.targetInterval * 0.35 &&
+          this.targetInterval > this.baseTargetInterval
+        ) {
+          this.targetInterval = Math.max(
+            this.baseTargetInterval,
+            Math.floor(this.targetInterval * 0.85)
+          );
+        }
+
+        // plan.md formula: delay = max(0, targetInterval - duration)
+        const delay = Math.max(this.minInterval, this.targetInterval - duration);
+        this._schedule(delay);
+      }
+    }
+  }
+}
+
+/**
+ * WebRTC Stats Collection & Adaptive Bitrate Control (plan.md Phase 1 —
+ * "No WebRTC Stats Collection").
+ *
+ * Polls RTCPeerConnection.getStats() for bandwidth, packet loss and RTT,
+ * exposes a live snapshot via onStats, and optionally clamps the outbound
+ * video encoder maxBitrate up/down based on measured packet loss.
+ */
+class AdaptiveBitrateController {
+  constructor(peerConnection, options = {}) {
+    this.pc = peerConnection;
+    this.intervalMs = options.intervalMs || 1000;
+    this.onStats = typeof options.onStats === 'function' ? options.onStats : null;
+    this.initialMaxBitrate = options.initialMaxBitrate || 1_500_000;
+    this.minBitrate = options.minBitrate || 150_000;
+    this.maxBitrateCeiling = options.maxBitrateCeiling || 2_500_000;
+
+    this.sender = null;
+    this.currentMaxBitrate = this.initialMaxBitrate;
+    this.statsInterval = null;
+    this.polling = false;
+
+    // Live network snapshot (single-source truth for consumers)
+    this.snapshot = {
+      rttMs: null,
+      packetsLost: 0,
+      lossPct: 0,
+      bitrateKbps: 0,
+      framesPerSecond: null,
+      quality: 'unknown' // good | degraded | poor | unknown
+    };
+
+    this._lastBytes = null;
+    this._lastTimestampUs = null;
+    this._lastLostTotal = null;
+    this._lastReceivedTotal = null;
+  }
+
+  /** Attach the outbound video sender whose encoding should be rate-limited. */
+  attachSender(sender) {
+    if (sender && typeof sender.getParameters === 'function') {
+      this.sender = sender;
+    }
+  }
+
+  startMonitoring() {
+    this.stopMonitoring();
+    this.statsInterval = setInterval(async () => {
+      if (this.polling) return; // Never overlap getStats rounds
+      this.polling = true;
+      try {
+        await this.pollOnce();
+      } catch {
+        // getStats can reject during ICE restarts/transient states — ignore round
+      } finally {
+        this.polling = false;
+      }
+    }, this.intervalMs);
+  }
+
+  stopMonitoring() {
+    if (this.statsInterval) {
+      clearInterval(this.statsInterval);
+      this.statsInterval = null;
+    }
+  }
+
+  async pollOnce() {
+    if (!this.pc || typeof this.pc.getStats !== 'function') return;
+    const report = await this.pc.getStats();
+
+    let inboundVideo = null;
+    let candidatePairRttS = null;
+
+    report.forEach((s) => {
+      if (s.type === 'inbound-rtp' && s.kind === 'video') {
+        inboundVideo = s;
+      } else if (
+        s.type === 'candidate-pair' &&
+        s.state === 'succeeded' &&
+        typeof s.currentRoundTripTime === 'number'
+      ) {
+        candidatePairRttS = s.currentRoundTripTime;
+      }
+    });
+
+    this._processReport(inboundVideo, candidatePairRttS);
+    await this._adaptSenderBitrate();
+    this.snapshot.currentMaxBitrateKbps = Math.round(this.currentMaxBitrate / 1000);
+
+    if (this.onStats) {
+      try {
+        this.onStats({ ...this.snapshot });
+      } catch (error) {
+        console.warn('[AdaptiveBitrateController] onStats callback failed:', error?.message);
+      }
+    }
+  }
+
+  _processReport(inboundVideo, rttSeconds) {
+    // ── Bitrate (delta bytes / delta time) ──
+    if (inboundVideo && typeof inboundVideo.bytesReceived === 'number') {
+      const nowUs =
+        inboundVideo.timestamp ||
+        (typeof performance !== 'undefined' ? performance.now() * 1000 : Date.now() * 1000);
+      if (this._lastBytes !== null && nowUs > this._lastTimestampUs) {
+        const bitsDelta = (inboundVideo.bytesReceived - this._lastBytes) * 8;
+        const seconds = (nowUs - this._lastTimestampUs) / 1_000_000;
+        this.snapshot.bitrateKbps = Math.max(0, Math.round(bitsDelta / seconds / 1000));
+      }
+      this._lastBytes = inboundVideo.bytesReceived;
+      this._lastTimestampUs = nowUs;
+    }
+
+    // ── Packet loss % (delta-based so it reflects recent conditions) ──
+    if (inboundVideo) {
+      const lost = inboundVideo.packetsLost || 0;
+      const received = inboundVideo.packetsReceived || 0;
+      if (this._lastLostTotal !== null) {
+        const dLost = Math.max(0, lost - this._lastLostTotal);
+        const dRecv = Math.max(0, received - this._lastReceivedTotal);
+        const total = dLost + dRecv;
+        this.snapshot.lossPct = total > 0 ? (dLost / total) * 100 : 0;
+        this.snapshot.quality = this._classifyQuality();
+      }
+      this._lastLostTotal = lost;
+      this._lastReceivedTotal = received;
+      this.snapshot.packetsLost = lost;
+    }
+
+    // ── RTT & decode FPS ──
+    if (rttSeconds !== null) {
+      this.snapshot.rttMs = Math.round(rttSeconds * 1000);
+    }
+    if (inboundVideo && typeof inboundVideo.framesPerSecond === 'number') {
+      this.snapshot.framesPerSecond = inboundVideo.framesPerSecond;
+    }
+  }
+
+  _classifyQuality() {
+    const loss = this.snapshot.lossPct;
+    const rtt = this.snapshot.rttMs;
+    if (loss > 8 || (rtt !== null && rtt > 400)) return 'poor';
+    if (loss > 2 || (rtt !== null && rtt > 200)) return 'degraded';
+    return 'good';
+  }
+
+  async _adaptSenderBitrate() {
+    if (!this.sender) return;
+
+    const prev = this.currentMaxBitrate;
+    if (this.snapshot.lossPct > 8) {
+      // Aggressive downshift under sustained loss
+      this.currentMaxBitrate = Math.max(
+        this.minBitrate,
+        Math.floor(this.currentMaxBitrate * 0.7)
+      );
+    } else if (this.snapshot.lossPct > 2) {
+      // Gentle downshift
+      this.currentMaxBitrate = Math.max(
+        this.minBitrate,
+        Math.floor(this.currentMaxBitrate * 0.9)
+      );
+    } else {
+      // Slow recovery when the network is healthy
+      this.currentMaxBitrate = Math.min(
+        this.maxBitrateCeiling,
+        this.currentMaxBitrate + 100_000
+      );
+    }
+
+    if (this.currentMaxBitrate === prev) return;
+
+    try {
+      const params = this.sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = this.currentMaxBitrate;
+      params.degradationPreference = 'maintain-framerate';
+      await this.sender.setParameters(params);
+    } catch (error) {
+      // Some browsers reject setParameters mid-negotiation; keep snapshot honest
+      this.currentMaxBitrate = prev;
+      console.warn('[AdaptiveBitrateController] setParameters rejected:', error?.message);
+    }
+  }
+
+  dispose() {
+    this.stopMonitoring();
+    this.sender = null;
+    this.onStats = null;
+  }
+}
+
 // Global namespace
 window.WebRTCUtils = {
   objectFitRect,
@@ -430,6 +716,8 @@ window.WebRTCUtils = {
   drawBoundingBoxes,
   IceCandidateQueue,
   PerfectNegotiator,
+  AdaptiveInferenceScheduler,
+  AdaptiveBitrateController,
   fetchIceConfig,
   showToast
 };

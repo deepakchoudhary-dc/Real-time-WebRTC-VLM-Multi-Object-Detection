@@ -96,6 +96,12 @@ function attachRoutes(app) {
     res.json(snapshot);
   });
 
+  // ── 3b. Prometheus Metrics Export (plan.md, zero-dependency) ──────
+  app.get('/metrics/prometheus', httpRateLimiter, (req, res) => {
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(metricsStore.getPrometheusFormat());
+  });
+
   // ── 4. Reset Metrics with Refreshed CSRF Token (G02) ──────────────
   app.post('/api/reset-metrics', httpRateLimiter, (req, res) => {
     if (!verifyAndConsumeCsrfToken(req)) {

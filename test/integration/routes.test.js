@@ -111,5 +111,33 @@ test('Integration Routes - Native Suite', async (t) => {
     assert.equal(reset2.status, 200);
   });
 
+  await t.test('Prometheus metrics export (plan.md, zero-dependency)', async () => {
+    const res = await fetch(`${baseUrl}/metrics/prometheus`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/plain/);
+
+    const body = await res.text();
+    // Prometheus text exposition format essentials
+    assert.ok(body.endsWith('\n'), 'output must end with a line feed');
+    assert.match(body, /^# HELP webrtc_detection_processed_frames_total /m);
+    assert.match(body, /^# TYPE webrtc_detection_processed_frames_total counter/m);
+    assert.match(body, /^webrtc_detection_processed_frames_total \d+$/m);
+    assert.match(body, /^webrtc_detection_uptime_seconds \d+$/m);
+    assert.match(body, /^webrtc_detection_latency_ms\{quantile="0.5"\} \d+$/m);
+    assert.match(body, /^webrtc_detection_latency_ms\{quantile="0.95"\} \d+$/m);
+    assert.match(body, /^webrtc_detection_latency_samples \d+$/m);
+    assert.match(body, /^webrtc_detection_processed_fps [\d.]+$/m);
+    // Every metric line must reference a declared HELP/TYPE family
+    const declared = new Set(
+      [...body.matchAll(/^# (?:HELP|TYPE) (\w+)/gm)].map((m) => m[1])
+    );
+    for (const match of body.matchAll(/^(\w+)(?:\{[^}]*\})? /gm)) {
+      assert.ok(
+        declared.has(match[1]) || /_min$|_max$|_avg$/.test(match[1]),
+        `metric ${match[1]} must belong to a declared family`
+      );
+    }
+  });
+
   await stopApp();
 });

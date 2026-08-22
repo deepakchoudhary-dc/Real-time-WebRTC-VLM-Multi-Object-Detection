@@ -65,7 +65,8 @@ class ObjectDetector {
 
         this.modelLoaded = true;
         return true;
-      } catch {
+      } catch (error) {
+        console.warn('[ObjectDetector] Model load failed:', error?.message || error);
         this.modelLoaded = false;
         return false;
       } finally {
@@ -114,7 +115,8 @@ class ObjectDetector {
       }));
 
       return detections;
-    } catch {
+    } catch (error) {
+      console.warn('[ObjectDetector] Detection failed:', error?.message || error);
       return [];
     }
   }

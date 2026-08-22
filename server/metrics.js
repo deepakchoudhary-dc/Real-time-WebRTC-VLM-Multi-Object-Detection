@@ -58,6 +58,38 @@ class MetricsStore {
       processed_fps: Math.round((this.processedFrames / durationSeconds) * 10) / 10
     };
   }
+
+  /**
+   * Prometheus text exposition format (version 0.0.4) — zero dependencies.
+   * Served at GET /metrics/prometheus (plan.md "Prometheus Metrics Export").
+   * @returns {string}
+   */
+  getPrometheusFormat() {
+    const s = this.getSnapshot();
+    const lines = [
+      '# HELP webrtc_detection_processed_frames_total Total detection frames processed.',
+      '# TYPE webrtc_detection_processed_frames_total counter',
+      `webrtc_detection_processed_frames_total ${s.processed_frames}`,
+      '# HELP webrtc_detection_uptime_seconds Server uptime in seconds.',
+      '# TYPE webrtc_detection_uptime_seconds gauge',
+      `webrtc_detection_uptime_seconds ${s.duration_seconds}`,
+      '# HELP webrtc_detection_latency_ms Detection end-to-end latency statistics.',
+      '# TYPE webrtc_detection_latency_ms summary',
+      `webrtc_detection_latency_ms{quantile="0.5"} ${s.median_latency_ms}`,
+      `webrtc_detection_latency_ms{quantile="0.95"} ${s.p95_latency_ms}`,
+      `webrtc_detection_latency_ms_min ${s.min_latency_ms}`,
+      `webrtc_detection_latency_ms_max ${s.max_latency_ms}`,
+      `webrtc_detection_latency_ms_avg ${s.avg_latency_ms}`,
+      '# HELP webrtc_detection_latency_samples Number of latency samples collected.',
+      '# TYPE webrtc_detection_latency_samples gauge',
+      `webrtc_detection_latency_samples ${s.sample_count}`,
+      '# HELP webrtc_detection_processed_fps Average processed frames per second.',
+      '# TYPE webrtc_detection_processed_fps gauge',
+      `webrtc_detection_processed_fps ${s.processed_fps}`
+    ];
+    // Prometheus requires the final line to end with a line feed
+    return lines.join('\n') + '\n';
+  }
 }
 
 const metricsStore = new MetricsStore();
